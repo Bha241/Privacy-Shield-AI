@@ -1,0 +1,407 @@
+/* ==========================================================================
+   PrivacyShield AI — Minimalist Obsidian Precision Design System
+   Inspired by UI-UX Pro Max Skill Design Intelligence Guidelines
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1. DESIGN TOKENS & SYSTEM VARIABLES
+   -------------------------------------------------------------------------- */
+:root {
+    /* Color Palette - Obsidian Dark (Default) */
+    --surface-lowest: #0e0e0e;
+    --surface-low: #131313;
+    --surface-container: #1c1b1b;
+    --surface-high: #201f1f;
+    --surface-highest: #2a2a2a;
+    --surface-bright: #353534;
+
+    --on-surface: #e5e2e1;
+    --on-surface-muted: #c2c6d8;
+    --on-surface-dim: #8c90a1;
+
+    --border-subtle: rgba(255, 255, 255, 0.08);
+    --border-active: rgba(179, 197, 255, 0.4);
+    --border-hover: rgba(255, 255, 255, 0.18);
+
+    /* Electric Accents */
+    --primary: #b3c5ff;
+    --primary-bright: #0066ff;
+    --on-primary: #002b75;
+    --primary-container: rgba(0, 102, 255, 0.15);
+    
+    --secondary: #c0c1ff;
+    --tertiary: #ffb59d;
+    
+    --accent-emerald: #10b981;
+    --accent-emerald-bg: rgba(16, 185, 129, 0.12);
+    --accent-amber: #f59e0b;
+    --accent-amber-bg: rgba(245, 158, 11, 0.12);
+    --error: #ffb4ab;
+    --error-bg: rgba(147, 0, 10, 0.25);
+
+    /* Typography */
+    --font-sans: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-mono: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+
+    /* Glassmorphism */
+    --glass-bg: rgba(19, 19, 19, 0.75);
+    --glass-border: rgba(255, 255, 255, 0.08);
+    --glass-blur: blur(20px) saturate(180%);
+
+    /* Radii */
+    --radius-sm: 4px;
+    --radius-md: 6px;
+    --radius-lg: 8px;
+    --radius-xl: 12px;
+    --radius-full: 9999px;
+
+    /* Layout dimensions */
+    --sidebar-width: 250px;
+    --right-panel-width: 280px;
+    --header-height: 64px;
+}
+
+/* Light Mode Overrides */
+html:not(.dark), body[data-theme="light"] {
+    --surface-lowest: #ffffff;
+    --surface-low: #f8f9fa;
+    --surface-container: #f1f3f5;
+    --surface-high: #e9ecef;
+    --surface-highest: #dee2e6;
+    --surface-bright: #ced4da;
+
+    --on-surface: #1a1a1a;
+    --on-surface-muted: #495057;
+    --on-surface-dim: #6c757d;
+
+    --border-subtle: rgba(0, 0, 0, 0.08);
+    --border-active: rgba(0, 84, 214, 0.4);
+    --border-hover: rgba(0, 0, 0, 0.15);
+
+    --primary: #0054d6;
+    --primary-bright: #0066ff;
+    --on-primary: #ffffff;
+    --primary-container: rgba(0, 102, 255, 0.08);
+
+    --glass-bg: rgba(255, 255, 255, 0.85);
+    --glass-border: rgba(0, 0, 0, 0.08);
+}
+
+/* --------------------------------------------------------------------------
+   2. GLOBAL BASE STYLES
+   -------------------------------------------------------------------------- */
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+html, body {
+    height: 100%;
+    width: 100%;
+    background-color: var(--surface-lowest);
+    color: var(--on-surface);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    overflow: hidden;
+}
+
+/* Typography Utility Helpers */
+.font-sans { font-family: var(--font-sans); }
+.font-mono { font-family: var(--font-mono); }
+
+.font-label-caps {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+/* Material Symbols Adjustments */
+.material-symbols-outlined {
+    font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+    vertical-align: middle;
+    user-select: none;
+}
+
+/* Scrollbar Customization */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: var(--radius-sm);
+}
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.25);
+}
+
+/* --------------------------------------------------------------------------
+   3. MINIMALIST GLASS & SURFACE CARDS
+   -------------------------------------------------------------------------- */
+.glass-panel {
+    background-color: var(--glass-bg);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg);
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.glass-panel:hover {
+    border-color: var(--border-hover);
+}
+
+.glass-card {
+    background: var(--surface-container);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg);
+    transition: all 0.2s ease;
+}
+
+/* Active Nav Pill Marker */
+.active-pill {
+    position: relative;
+    background: var(--primary-container) !important;
+    border-left: 2px solid var(--primary);
+    color: var(--primary) !important;
+}
+
+/* --------------------------------------------------------------------------
+   4. BADGES, CHIPS & STATUS
+   -------------------------------------------------------------------------- */
+.badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border-radius: var(--radius-sm);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1.2;
+}
+
+.badge-primary {
+    background: var(--primary-container);
+    color: var(--primary);
+    border: 1px solid rgba(179, 197, 255, 0.25);
+}
+
+.badge-success {
+    background: var(--accent-emerald-bg);
+    color: var(--accent-emerald);
+    border: 1px solid rgba(16, 185, 129, 0.25);
+}
+
+.badge-amber {
+    background: var(--accent-amber-bg);
+    color: var(--accent-amber);
+    border: 1px solid rgba(245, 158, 11, 0.25);
+}
+
+/* --------------------------------------------------------------------------
+   5. MINIMAL FORM CONTROLS & SWITCHES
+   -------------------------------------------------------------------------- */
+input[type="text"], input[type="password"], select, textarea {
+    background-color: var(--surface-highest);
+    border: 1px solid var(--border-subtle);
+    color: var(--on-surface);
+    border-radius: var(--radius-md);
+    padding: 8px 12px;
+    font-family: var(--font-sans);
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+input[type="text"]:focus, input[type="password"]:focus, select:focus, textarea:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 2px rgba(179, 197, 255, 0.15);
+}
+
+/* Custom Minimal Toggle Switch */
+.switch {
+    position: relative;
+    display: inline-block;
+    width: 32px;
+    height: 18px;
+}
+
+.switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background-color: var(--surface-highest);
+    border: 1px solid var(--border-subtle);
+    transition: .2s ease;
+    border-radius: 18px;
+}
+
+.slider:before {
+    position: absolute;
+    content: "";
+    height: 12px;
+    width: 12px;
+    left: 2px;
+    bottom: 2px;
+    background-color: var(--on-surface-muted);
+    transition: .2s ease;
+    border-radius: 50%;
+}
+
+input:checked + .slider {
+    background-color: var(--primary-container);
+    border-color: var(--primary);
+}
+
+input:checked + .slider:before {
+    transform: translateX(14px);
+    background-color: var(--primary);
+}
+
+/* Range Slider */
+input[type="range"] {
+    -webkit-appearance: none;
+    width: 100%;
+    background: transparent;
+    cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+    width: 100%;
+    height: 4px;
+    background: var(--surface-highest);
+    border-radius: 2px;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+    height: 14px;
+    width: 14px;
+    border-radius: 50%;
+    background: var(--primary);
+    cursor: pointer;
+    -webkit-appearance: none;
+    margin-top: -5px;
+    box-shadow: 0 0 8px rgba(179, 197, 255, 0.4);
+    transition: transform 0.15s ease;
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+    transform: scale(1.15);
+}
+
+/* --------------------------------------------------------------------------
+   6. TABLES (HITL REDACTION STUDIO)
+   -------------------------------------------------------------------------- */
+.hitl-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+}
+
+.hitl-table th {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--on-surface-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-subtle);
+    background: var(--surface-low);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+.hitl-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-subtle);
+    font-size: 13px;
+    vertical-align: middle;
+}
+
+.hitl-table tr:hover td {
+    background-color: rgba(255, 255, 255, 0.02);
+}
+
+/* --------------------------------------------------------------------------
+   7. BUTTONS
+   -------------------------------------------------------------------------- */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 7px 14px;
+    border-radius: var(--radius-md);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+    user-select: none;
+}
+
+.btn-primary {
+    background-color: var(--primary);
+    color: var(--on-primary);
+    border-color: var(--primary);
+    font-weight: 600;
+}
+
+.btn-primary:hover {
+    filter: brightness(1.1);
+    box-shadow: 0 0 12px rgba(179, 197, 255, 0.3);
+}
+
+.btn-primary:active {
+    transform: scale(0.98);
+}
+
+.btn-ghost {
+    background-color: transparent;
+    color: var(--on-surface-muted);
+    border-color: var(--border-subtle);
+}
+
+.btn-ghost:hover {
+    color: var(--on-surface);
+    background-color: rgba(255, 255, 255, 0.05);
+    border-color: var(--border-hover);
+}
+
+.btn-sm {
+    padding: 4px 10px;
+    font-size: 12px;
+    border-radius: var(--radius-sm);
+}
+
+/* Animations */
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+    animation: fadeIn 0.25s ease-out forwards;
+}

@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html class="dark" lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+    <title>PrivacyShield AI - Enterprise Safety Studio</title>
+    
+    <!-- Tailwind CSS with plugins -->
+    <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+    
+    <!-- Design System Fonts: Geist + JetBrains Mono + Material Symbols Outlined -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet"/>
+    <link rel="stylesheet" href="/static/styles.css"/>
+
+    <script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "surface": "#0e0e0e",
+                        "surface-low": "#131313",
+                        "surface-container": "#1c1b1b",
+                        "surface-container-low": "#181818",
+                        "surface-container-high": "#201f1f",
+                        "surface-container-highest": "#2a2a2a",
+                        "primary": "#b3c5ff",
+                        "primary-bright": "#0066ff",
+                        "on-primary": "#002b75",
+                        "on-surface": "#e5e2e1",
+                        "on-surface-variant": "#c2c6d8",
+                        "outline": "#8c90a1",
+                        "outline-variant": "#424656",
+                        "error": "#ffb4ab",
+                        "accent-emerald": "#10b981",
+                        "accent-amber": "#f59e0b"
+                    },
+                    fontFamily: {
+                        sans: ['Geist', 'Inter', '-apple-system', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'Fira Code', 'Consolas', 'monospace']
+                    },
+                    borderRadius: {
+                        'DEFAULT': '0.375rem',
+                        'sm': '0.25rem',
+                        'md': '0.375rem',
+                        'lg': '0.5rem',
+                        'xl': '0.75rem'
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="h-screen flex overflow-hidden bg-surface text-on-surface font-sans">
+
+    <!-- Left Side Navigation Rail (240px) -->
+    <aside class="fixed left-0 top-0 h-screen w-[240px] flex flex-col py-4 px-3 bg-surface-low/90 border-r border-white/10 backdrop-blur-xl z-50">
+        
+        <!-- Header & Logo -->
+        <div class="mb-5 px-2">
+            <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded-md bg-primary/20 border border-primary/40 flex items-center justify-center shrink-0">
+                    <span class="material-symbols-outlined text-primary text-[20px]" style="font-variation-settings: 'FILL' 1;">security</span>
+                </div>
+                <div>
+                    <h1 class="text-base font-bold text-on-surface leading-tight tracking-tight">PrivacyShield <span class="text-primary">AI</span></h1>
+                    <p class="text-[10px] font-mono text-primary/80 uppercase tracking-wider">Enterprise Safety</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Navigation Items -->
+        <nav class="flex-1 space-y-1 overflow-y-auto no-scrollbar">
+            <a class="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-white/5 transition-colors text-on-surface font-semibold active-pill" href="#" onclick="event.preventDefault()">
+                <span class="material-symbols-outlined text-primary text-[20px]">dashboard</span>
+                <span class="text-xs">Dashboard</span>
+            </a>
+            <button class="w-full flex items-center gap-3 px-3 py-2 rounded-md text-on-surface-variant hover:text-on-surface hover:bg-white/5 transition-colors text-xs font-medium text-left" onclick="toggleHitlPanel()">
+                <span class="material-symbols-outlined text-primary text-[20px]">verified_user</span>
+                <span>Redaction Studio</span>
+            </button>
+            <button class="w-full flex items-center gap-3 px-3 py-2 rounded-md text-on-surface-variant hover:text-on-surface hover:bg-white/5 transition-colors text-xs font-medium text-left" onclick="toggleDemaskDocView()">
+                <span class="material-symbols-outlined text-primary text-[20px]">visibility</span>
+                <span>Doc Inspector</span>
+            </button>
+            <button class="w-full flex items-center gap-3 px-3 py-2 rounded-md text-on-surface-variant hover:text-on-surface hover:bg-white/5 transition-colors text-xs font-medium text-left" onclick="toggleRightPanel()">
+                <span class="material-symbols-outlined text-primary text-[20px]">tune</span>
+                <span>LLM Controls</span>
+            </button>
+
+            <!-- Domain Select -->
+            <div class="pt-4 px-1">
+                <div class="text-[10px] font-mono font-medium text-on-surface-variant/60 uppercase tracking-widest mb-2">PII ENGINE DOMAIN</div>
+                <select id="domain-select" class="w-full bg-surface-container-highest border border-white/10 rounded-md px-2.5 py-1.5 text-xs font-mono text-primary focus:ring-primary focus:border-primary">
+                    <option value="general">🌐 General Domain</option>
+                    <option value="finance">💰 Finance & Banking</option>
+                    <option value="ecommerce">🛒 E-Commerce & Retail</option>
+                    <option value="supply_chain">🚚 Supply Chain</option>
+                    <option value="healthcare">🏥 Healthcare & Medical</option>
+                </select>
+            </div>
+
+            <!-- Active Workspace Documents -->
+            <div class="pt-5 pb-2 px-1 flex items-center justify-between">
+                <span class="text-[10px] font-mono font-medium text-on-surface-variant/60 uppercase tracking-widest">ACTIVE DOCUMENTS</span>
+                <span class="badge badge-primary" id="uploaded-domain-badge">GLOBAL</span>
+            </div>
+            
+            <div class="space-y-1.5" id="uploaded-files-panel">
+                <div id="files-chip-grid" class="space-y-1.5">
+                    <!-- Dynamic File Chips -->
+                </div>
+            </div>
+        </nav>
+
+        <!-- Bottom Actions -->
+        <div class="mt-auto pt-4 space-y-2 border-t border-white/10 px-1">
+            <button class="w-full py-2 bg-primary/10 border border-primary/30 text-primary rounded-md text-xs font-mono font-semibold flex items-center justify-center gap-1.5 hover:bg-primary/20 transition-all active:scale-95" onclick="document.getElementById('file-input').click()">
+                <span class="material-symbols-outlined text-[18px]">add</span> Analyze Document
+            </button>
+            <input type="file" id="file-input" multiple style="display: none;" accept=".pdf,.txt,.doc,.docx,.png,.jpg,.jpeg,.bmp" onchange="handleFileSelect(event)">
+            
+            <div class="flex justify-between items-center pt-2 text-on-surface-variant text-[11px] font-mono">
+                <button onclick="clearUploadedFiles()" class="hover:text-error transition-colors flex items-center gap-1">
+                    <span class="material-symbols-outlined text-[14px]">delete</span> Clear
+                </button>
+                <button id="theme-toggle-btn" onclick="toggleTheme()" class="hover:text-primary transition-colors flex items-center gap-1">
+                    <span id="theme-icon">☀️</span> <span id="theme-label">Dark</span>
+                </button>
+            </div>
+        </div>
+    </aside>
+
+    <!-- Main Viewport -->
+    <main class="ml-[240px] 2xl:mr-[280px] flex-1 flex flex-col h-screen relative bg-surface">
+        
+        <!-- Header Bar -->
+        <header class="h-16 flex justify-between items-center px-6 border-b border-white/10 bg-surface-low/80 backdrop-blur-xl sticky top-0 z-40">
+            <div class="flex items-center gap-4 flex-1">
+                <button class="p-1 rounded hover:bg-white/5 lg:hidden text-on-surface-variant" onclick="toggleLeftNav()">
+                    <span class="material-symbols-outlined">menu</span>
+                </button>
+
+                <div class="flex items-center gap-2 bg-surface-container-highest px-3 py-1.5 rounded-full border border-white/10 w-full max-w-xl">
+                    <span class="material-symbols-outlined text-on-surface-variant text-[18px]">search</span>
+                    <span id="file-status-text" class="text-xs text-on-surface-variant truncate font-sans">No document uploaded yet. Click <strong>"Analyze Document"</strong>.</span>
+                </div>
+            </div>
+
+            <div class="flex items-center gap-3 shrink-0">
+                <div class="hidden sm:flex items-center gap-2 px-3 py-1 bg-accent-emerald/10 border border-accent-emerald/20 rounded-full">
+                    <span class="w-1.5 h-1.5 rounded-full bg-accent-emerald animate-pulse"></span>
+                    <span class="text-[11px] font-mono text-accent-emerald">Zero Cloud Leakage</span>
+                </div>
+
+                <button class="px-3 py-1.5 bg-primary text-on-primary rounded text-xs font-mono font-semibold hover:brightness-110 transition-all" onclick="document.getElementById('file-input').click()">
+                    + Deploy File
+                </button>
+            </div>
+        </header>
+
+        <!-- Dynamic Redaction & Document Inspector Panels -->
+        <div class="px-6 pt-4 w-full">
+            
+            <!-- Redaction Verification Studio -->
+            <div class="glass-panel p-4 mb-4 w-full animate-fade-in" id="hitl-panel" style="display: none;">
+                <div class="flex justify-between items-center mb-3 border-b border-white/10 pb-3">
+                    <div>
+                        <h3 class="text-sm font-bold text-on-surface flex items-center gap-2">
+                            <span class="material-symbols-outlined text-primary text-[20px]">verified_user</span> Redaction Verification Studio
+                        </h3>
+                        <p class="text-xs text-on-surface-variant">Review detected PII entities, approve redaction masks, or add custom fields.</p>
+                    </div>
+                    <div class="flex gap-2">
+                        <button class="btn btn-ghost btn-sm" onclick="addCustomEntityRow()">+ Add Custom PII</button>
+                        <button class="btn btn-ghost btn-sm text-accent-amber border-accent-amber/30 hover:bg-accent-amber/10" onclick="proceedWithoutMasking()">⚠️ Go Without Masking</button>
+                        <button class="btn btn-primary btn-sm" onclick="submitHitlVerification()">Verify & Apply Redaction 🚀</button>
+                    </div>
+                </div>
+
+                <div class="overflow-x-auto max-h-64 no-scrollbar border border-white/10 rounded-md">
+                    <table class="hitl-table">
+                        <thead>
+                            <tr>
+                                <th>Mask?</th>
+                                <th>Detected Text</th>
+                                <th>Category Label</th>
+                                <th>Confidence</th>
+                                <th>Source File</th>
+                            </tr>
+                        </thead>
+                        <tbody id="hitl-table-body">
+                            <!-- Dynamic Entity Rows -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Document Inspector -->
+            <div class="glass-panel p-4 mb-4 w-full animate-fade-in" id="demask-panel" style="display: none;">
+                <div class="flex justify-between items-center mb-3 border-b border-white/10 pb-3">
+                    <div>
+                        <h3 class="text-sm font-bold text-on-surface flex items-center gap-2">
+                            <span class="material-symbols-outlined text-primary text-[20px]">visibility</span> Document Inspector
+                        </h3>
+                        <p class="text-xs text-on-surface-variant">Compare raw unmasked original text with encrypted tokenized output.</p>
+                    </div>
+                    <div class="flex gap-2">
+                        <button class="btn btn-ghost btn-sm" onclick="toggleViewText()">🔄 Switch View</button>
+                        <button class="btn btn-ghost btn-sm" onclick="downloadMaskedDoc()">⬇️ Download Masked</button>
+                        <button class="btn btn-ghost btn-sm" onclick="downloadMappingJson()">⬇️ Download Key</button>
+                    </div>
+                </div>
+                <div class="bg-surface-container-low border border-white/10 p-3 rounded-md font-mono text-xs text-on-surface max-h-64 overflow-y-auto whitespace-pre-wrap" id="doc-viewer-text">
+                    Upload and verify a document to inspect text here.
+                </div>
+            </div>
+
+        </div>
+
+        <!-- Chat Stream Workspace (Full Width) -->
+        <div class="flex-1 overflow-y-auto no-scrollbar pb-32 flex flex-col w-full" id="chat-history-container">
+            <div class="w-full max-w-4xl mx-auto px-6 pt-4 space-y-6" id="chat-stream">
+                
+                <!-- Obsidian Minimalist Welcome Card -->
+                <div class="glass-panel p-6 space-y-6 relative overflow-hidden w-full">
+                    <div class="absolute top-0 right-0 p-4">
+                        <span class="badge badge-success">🛡️ Zero Cloud Leakage</span>
+                    </div>
+                    
+                    <div class="text-center space-y-3 py-4">
+                        <h2 class="text-2xl font-bold text-on-surface tracking-tight">Welcome to <span class="text-primary">PrivacyShield AI</span></h2>
+                        <p class="text-sm text-on-surface-variant max-w-xl mx-auto leading-relaxed">
+                            Your sensitive personal data (PII) is automatically anonymized locally before reaching cloud AI models. 
+                            Maintain full context while preserving absolute privacy.
+                        </p>
+                    </div>
+
+                    <div class="grid md:grid-cols-3 gap-4 border-t border-white/5 pt-4">
+                        <div class="space-y-1 cursor-pointer hover:bg-white/5 p-3 rounded-md transition-colors" onclick="document.getElementById('file-input').click()">
+                            <div class="flex items-center gap-2 text-primary font-semibold text-xs font-mono">
+                                <span class="material-symbols-outlined text-[18px]">folder_zip</span>
+                                <span>1. UPLOAD DOCUMENT</span>
+                            </div>
+                            <p class="text-on-surface-variant text-xs leading-normal">Drop PDFs, DOCX, TXT or Images for PII scanning.</p>
+                        </div>
+
+                        <div class="space-y-1 cursor-pointer hover:bg-white/5 p-3 rounded-md transition-colors" onclick="toggleHitlPanel()">
+                            <div class="flex items-center gap-2 text-primary font-semibold text-xs font-mono">
+                                <span class="material-symbols-outlined text-[18px]">verified</span>
+                                <span>2. VERIFY REDACTIONS</span>
+                            </div>
+                            <p class="text-on-surface-variant text-xs leading-normal">Approve flagged names, phone numbers, PAN, & Aadhaar.</p>
+                        </div>
+
+                        <div class="space-y-1 cursor-pointer hover:bg-white/5 p-3 rounded-md transition-colors" onclick="document.getElementById('chat-input').focus()">
+                            <div class="flex items-center gap-2 text-primary font-semibold text-xs font-mono">
+                                <span class="material-symbols-outlined text-[18px]">forum</span>
+                                <span>3. ASK AI QUESTIONS</span>
+                            </div>
+                            <p class="text-on-surface-variant text-xs leading-normal">Query your documents safely without data leakage.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Initial Assistant Greeting -->
+                <div class="flex gap-4 w-full">
+                    <div class="w-9 h-9 rounded bg-surface-container-high border border-white/10 flex items-center justify-center shrink-0">
+                        <span class="material-symbols-outlined text-primary text-[20px]">smart_toy</span>
+                    </div>
+                    <div class="space-y-1.5 flex-1">
+                        <div class="flex items-center justify-between">
+                            <span class="text-[10px] font-mono font-medium text-on-surface-variant/70">PRIVACYSHIELD ASSISTANT</span>
+                            <span class="badge badge-success">🛡️ Zero Cloud Leakage</span>
+                        </div>
+                        <div class="glass-panel p-4 text-on-surface text-xs leading-relaxed w-full">
+                            Hello! Upload a document via <strong>"Analyze Document"</strong> or ask a question directly below.<br>
+                            All sensitive PII entities are automatically redacted locally before sending queries to AI models.
+                        </div>
+                        <div class="flex gap-2 pt-1">
+                            <button class="btn btn-ghost btn-sm rounded-full text-primary" onclick="quickPrompt('Summarize key points in my uploaded document without leaking any PII.')">📝 Summarize Document</button>
+                            <button class="btn btn-ghost btn-sm rounded-full text-primary" onclick="quickPrompt('What sensitive PII entities were detected and redacted?')">🛡️ Check Redacted PII</button>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <!-- Floating Bottom Prompt Bar Capsule -->
+        <div class="absolute bottom-0 left-0 right-0 px-6 py-4 pointer-events-none z-30">
+            <div class="max-w-4xl mx-auto w-full pointer-events-auto">
+                <div class="glass-panel p-2 pl-4 rounded-full flex items-center gap-3 border border-white/10 shadow-2xl w-full">
+                    <button class="w-8 h-8 rounded-full flex items-center justify-center text-on-surface-variant hover:text-on-surface hover:bg-white/10 transition-colors shrink-0" onclick="document.getElementById('file-input').click()" title="Add Document">
+                        <span class="material-symbols-outlined text-[20px]">add</span>
+                    </button>
+                    
+                    <textarea id="chat-input" class="flex-1 bg-transparent border-none focus:ring-0 text-xs text-on-surface placeholder:text-on-surface-variant/50 resize-none py-1.5" placeholder="Ask a question or request analysis..." rows="1" onkeypress="handleChatKeyPress(event)"></textarea>
+
+                    <div class="h-6 w-px bg-white/10 hidden sm:block"></div>
+
+                    <div class="hidden sm:flex items-center gap-3 px-2">
+                        <div class="flex items-center gap-1.5" title="Mask PII in prompt before sending to LLM">
+                            <span class="text-[10px] font-mono text-primary">Mask Input</span>
+                            <label class="switch">
+                                <input type="checkbox" id="mask-prompt-toggle" checked onchange="toggleMaskPrompt(this.checked)">
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+
+                        <div class="flex items-center gap-1.5" title="Auto de-mask tokens in LLM response">
+                            <span class="text-[10px] font-mono text-on-surface-variant">De-mask Resp</span>
+                            <label class="switch">
+                                <input type="checkbox" id="global-demask-toggle" onchange="toggleGlobalDemask(this.checked)">
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <button class="btn btn-primary btn-sm rounded-full px-4 h-9 font-mono text-xs flex items-center gap-1" onclick="sendChatQuery()">
+                        <span>Send</span>
+                        <span class="material-symbols-outlined text-[16px]">send</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+    </main>
+
+    <!-- Right Control Panel (LLM Hyperparameters - 280px) -->
+    <aside id="right-panel" class="w-[280px] h-screen bg-surface-low/90 border-l border-white/10 backdrop-blur-xl flex flex-col fixed right-0 top-0 hidden 2xl:flex z-50">
+        <div class="p-4 border-b border-white/10 flex items-center justify-between">
+            <span class="text-xs font-mono font-bold text-on-surface uppercase tracking-wider">HYPERPARAMETERS</span>
+            <span class="material-symbols-outlined text-on-surface-variant text-[18px]">tune</span>
+        </div>
+
+        <div class="p-4 flex-1 overflow-y-auto no-scrollbar space-y-6">
+            
+            <!-- Temperature -->
+            <div class="space-y-2">
+                <div class="flex justify-between items-center text-xs">
+                    <span class="text-on-surface-variant font-mono text-[11px]">Temperature</span>
+                    <strong class="font-mono text-primary" id="temp-val">0.2</strong>
+                </div>
+                <input id="param-temp" max="1" min="0" step="0.05" type="range" value="0.2" oninput="document.getElementById('temp-val').innerText=this.value"/>
+                <div class="flex justify-between text-[9px] text-on-surface-variant/50 font-mono">
+                    <span>DETERMINISTIC</span>
+                    <span>CREATIVE</span>
+                </div>
+            </div>
+
+            <!-- Top_P -->
+            <div class="space-y-2">
+                <div class="flex justify-between items-center text-xs">
+                    <span class="text-on-surface-variant font-mono text-[11px]">Top_P (Nucleus)</span>
+                    <strong class="font-mono text-primary" id="topp-val">0.95</strong>
+                </div>
+                <input id="param-topp" max="1" min="0.1" step="0.05" type="range" value="0.95" oninput="document.getElementById('topp-val').innerText=this.value"/>
+            </div>
+
+            <!-- Max Tokens -->
+            <div class="space-y-2">
+                <label class="text-[11px] font-mono text-on-surface-variant block">Max Tokens</label>
+                <select id="param-maxtokens" class="w-full bg-surface-container-highest border border-white/10 rounded text-xs text-on-surface font-mono focus:ring-primary focus:border-primary px-2.5 py-1.5">
+                    <option value="256">256 tokens (Concise)</option>
+                    <option value="512" selected>512 tokens (Standard Q&A)</option>
+                    <option value="1024">1024 tokens (Summary)</option>
+                    <option value="2048">2048 tokens (Max Report)</option>
+                </select>
+            </div>
+
+            <!-- Model Engine Selection -->
+            <div class="space-y-2">
+                <label class="text-[11px] font-mono text-on-surface-variant block">Model Engine</label>
+                <select id="param-model" class="w-full bg-surface-container-highest border border-white/10 rounded text-xs text-on-surface font-mono focus:ring-primary focus:border-primary px-2.5 py-1.5">
+                    <option value="llama-3.1-8b-instant" selected>Groq: Llama 3.1 8B Instant (Fast)</option>
+                    <option value="llama-3.3-70b-versatile">Groq: Llama 3.3 70B Versatile</option>
+                    <option value="llama-3.2-3b-preview">Groq: Llama 3.2 3B Preview</option>
+                    <option value="deepseek-r1-distill-llama-70b">Groq: DeepSeek R1 70B</option>
+                </select>
+            </div>
+
+            <!-- Custom Groq API Key Input -->
+            <div class="space-y-2">
+                <div class="flex justify-between items-center text-xs">
+                    <label class="font-mono text-[11px] text-on-surface-variant">Custom Groq API Key</label>
+                    <span class="text-[10px] text-primary font-mono">Optional</span>
+                </div>
+                <input id="param-apikey" type="password" placeholder="gsk_..." class="w-full bg-surface-container-highest border border-white/10 rounded text-xs text-on-surface font-mono focus:ring-primary focus:border-primary px-2.5 py-1.5" />
+                <p class="text-[10px] text-on-surface-variant/60">Paste your Groq key if system key encounters network or rate limits.</p>
+            </div>
+
+        </div>
+
+        <div class="p-4 border-t border-white/10">
+            <div class="flex items-center justify-between text-xs">
+                <div class="flex flex-col">
+                    <span class="text-on-surface-variant font-mono text-[10px]">SECURITY PROTOCOL</span>
+                    <span class="font-mono text-primary text-[11px]">TLS 1.3 • DPDP 2025</span>
+                </div>
+                <div class="w-6 h-6 rounded bg-primary/20 flex items-center justify-center">
+                    <span class="material-symbols-outlined text-primary text-[14px]">lock</span>
+                </div>
+            </div>
+        </div>
+    </aside>
+
+    <script src="/static/app.js"></script>
+    <script>
+        function toggleRightPanel() {
+            const panel = document.getElementById('right-panel');
+            if (panel) {
+                panel.classList.toggle('hidden');
+                panel.classList.toggle('flex');
+            }
+        }
+        function toggleLeftNav() {
+            const nav = document.querySelector('aside');
+            if (nav) {
+                nav.classList.toggle('hidden');
+            }
+        }
+    </script>
+</body>
+</html>
