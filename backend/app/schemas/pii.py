@@ -37,9 +37,11 @@ class LLMSettings(BaseModel):
 
 class ChatMessageRequest(BaseModel):
     message: str
-    original_text: str
-    redacted_text: str
-    entities: List[EntityMatch]
+    original_text: Optional[str] = ""
+    redacted_text: Optional[str] = ""
+    entities: Optional[List[EntityMatch]] = None
+    document_id: Optional[str] = None
+    file_name: Optional[str] = None
     llm_settings: Optional[LLMSettings] = None
 
 class ChatMessageResponse(BaseModel):
@@ -48,4 +50,9 @@ class ChatMessageResponse(BaseModel):
     sources_retrieved: List[str]
     model_used: str
     processing_time_ms: int
+    provider_used: Optional[str] = "Groq"
+    routing_strategy: Optional[str] = "Cloud"
+    fallback_reason: Optional[str] = None
+    latency_ms: Optional[int] = None
+    request_id: Optional[str] = None
 

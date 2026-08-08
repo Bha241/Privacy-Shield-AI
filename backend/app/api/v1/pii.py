@@ -3,9 +3,10 @@ import time
 import re
 import hashlib
 import logging
+import uuid
 from pathlib import Path
 from typing import List, Dict, Optional, Any
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
 
 from app.schemas.pii import (
@@ -265,6 +266,54 @@ async def redact_pii(request: PIIRedactRequest):
 
 
 # ============================================================
+# /redact-file → Parse full document (DOCX/PDF/TXT) + PII Detection
+# ============================================================
+
+@router.post("/redact-file", response_model=PIIRedactResponse)
+async def redact_pii_from_file(
+    file: UploadFile = File(...),
+    masking_strategy: Optional[str] = Form("REPLACE")
+):
+    """
+    Parses full text from uploaded binary documents (DOCX, PDF, TXT, DOC, images),
+    runs PII detection, risk evaluation, and returns full original_text and redacted_text.
+    """
+    try:
+        filename = file.filename or "uploaded_document.txt"
+        file_ext = Path(filename).suffix.lower()
+        contents = await file.read()
+
+        temp_dir = Path("./temp_uploads")
+        temp_dir.mkdir(exist_ok=True)
+        temp_path = temp_dir / f"upload_{uuid.uuid4().hex[:8]}{file_ext}"
+
+        with open(temp_path, "wb") as f:
+            f.write(contents)
+
+        try:
+            from app.agents.readers.document_reader import DocumentReader
+            reader = DocumentReader(enable_ocr=True)
+            text = reader.read_document(str(temp_path))
+        finally:
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except Exception:
+                    pass
+
+        if not text or not text.strip():
+            raise HTTPException(status_code=400, detail=f"No readable text found in document '{filename}'")
+
+        return await redact_pii(PIIRedactRequest(text=text.strip(), masking_strategy=masking_strategy))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error parsing file for PII: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+# ============================================================
 # /mask  → Apply HITL approved entities + Ingest into RAG
 # ============================================================
 
@@ -382,10 +431,27 @@ async def chat_rag(request: ChatMessageRequest):
         raise HTTPException(400, "Message cannot be empty")
 
     llm_settings = request.llm_settings or LLMSettings()
-    document_id = getattr(request, "document_id", None) or "doc_default"
+    document_id = request.document_id or request.file_name or getattr(request, "document_id", None) or "doc_default"
 
     if not RAG_AGENT_LOADED or not rag_agent:
         raise HTTPException(503, "PrivacyRAGAgent is not available")
+
+    # Auto-ingest text if document is not yet in rag_agent cache but text is provided in chat request
+    text_to_ingest = (request.redacted_text or request.original_text or "").strip()
+    if rag_agent and text_to_ingest:
+        target_id = rag_agent.resolve_document_id(document_id)
+        if target_id == "doc_default" or not rag_agent.document_cache.has_document(target_id):
+            active_id = document_id if document_id != "doc_default" else f"doc_chat_{int(time.time())}"
+            class TempMasked:
+                def __init__(self, text):
+                    self.masked_text = text
+                    self.mapping = {}
+            rag_agent.ingest_masked_result(
+                masked_result=TempMasked(text_to_ingest),
+                file_name=request.file_name or active_id,
+                document_id=active_id
+            )
+            document_id = active_id
 
     try:
         result = rag_agent.answer_query(
@@ -422,12 +488,26 @@ async def chat_rag(request: ChatMessageRequest):
             demasked_response=result["final_unmasked_answer"],
             sources_retrieved=result.get("sources_retrieved", ["vector_store"]),
             model_used=result.get("model_used", "llama-3.3-70b-versatile"),
-            processing_time_ms=proc_time
+            processing_time_ms=proc_time,
+            provider_used=result.get("provider_used", "Groq"),
+            routing_strategy=result.get("routing_strategy", "Cloud"),
+            fallback_reason=result.get("fallback_reason"),
+            latency_ms=result.get("latency_ms", proc_time),
+            request_id=result.get("request_id")
         )
 
     except Exception as e:
         logger.exception("Chat failed")
         raise HTTPException(500, f"Chat failed: {str(e)}")
+
+
+@router.get("/llm-health")
+async def get_llm_health():
+    """Runs diagnostics across configured LLM providers."""
+    if RAG_AGENT_LOADED and rag_agent and hasattr(rag_agent, "llm_router"):
+        return rag_agent.llm_router.health_check()
+    from app.agents.llm_router import LLMRouter
+    return LLMRouter().health_check()
 
 
 # Helper functions kept for fallback

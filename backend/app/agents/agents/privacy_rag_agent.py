@@ -1,3 +1,17 @@
+"""
+PrivacyShieldAI - Privacy-Preserving RAG Agent (v3.0 AI Document Analyst Architecture)
+Integrates:
+- DocumentOrchestrator: Categorizes queries into DOCUMENT_LEVEL vs FACT_LEVEL and chooses context strategies (FULL_DOCUMENT, SEMANTIC_RETRIEVAL, HYBRID).
+- DocumentCache: In-memory store for instant full document retrieval without vector search.
+- DocumentClassifier: Classifies document types (MSA, Invoice, Medical Record, Onboarding, etc.) and assigns expert personas.
+- PromptManager: Reasoning-oriented Chain-of-Thought prompts, dynamic summary modes, and rich few-shot library.
+- IntentClassifier: Classifies user intent into specialized document analysis modes.
+- ContextBuilder: Multi-strategy context expansion, strict document isolation, retrieval confidence, and citations.
+- ResponseFormatter: Eliminates AI cliches, strips robotic labels, formats intent outputs, and performs quality self-reviews.
+- LLMRouter: Multi-tier cascade generation across Groq Cloud, Local Qwen, Future Providers, and Smart Synthesis.
+- PII Masking & De-masking: Zero raw PII leaves local environment.
+"""
+
 import os
 import re
 import time
@@ -20,19 +34,27 @@ except ImportError:
         vector_store_manager = None
         generate_text_embedding = lambda text: [0.0] * 384
 
-logger = logging.getLogger(__name__)
+# Import modular AI Document Analyst & Orchestrator components
+try:
+    from app.agents.document_cache import document_cache
+    from app.agents.document_orchestrator import DocumentOrchestrator
+    from app.agents.document_classifier import DocumentClassifier
+    from app.agents.prompt_manager import PromptManager
+    from app.agents.intent_classifier import IntentClassifier
+    from app.agents.context_builder import ContextBuilder
+    from app.agents.response_formatter import ResponseFormatter
+    from app.agents.llm_router import LLMRouter, MODEL_MAPPING
+except ImportError:
+    from pii_detector.document_cache import document_cache
+    from pii_detector.document_orchestrator import DocumentOrchestrator
+    from pii_detector.document_classifier import DocumentClassifier
+    from pii_detector.prompt_manager import PromptManager
+    from pii_detector.intent_classifier import IntentClassifier
+    from pii_detector.context_builder import ContextBuilder
+    from pii_detector.response_formatter import ResponseFormatter
+    from pii_detector.llm_router import LLMRouter, MODEL_MAPPING
 
-# -------------------------------------------------
-# Model Mapping & PII Patterns
-# -------------------------------------------------
-MODEL_MAPPING = {
-    "llama3-70b-8192": "llama-3.3-70b-versatile",
-    "mixtral-8x7b-32768": "llama-3.1-8b-instant",
-    "gemma2-9b-it": "llama-3.1-8b-instant",
-    "llama3-8b-8192": "llama-3.1-8b-instant",
-    "llama-3.3-70b-versatile": "llama-3.3-70b-versatile",
-    "llama-3.1-8b-instant": "llama-3.1-8b-instant",
-}
+logger = logging.getLogger(__name__)
 
 QUERY_PII_PATTERNS = {
     "AADHAAR": r"\b[2-9]\d{3}\s?\d{4}\s?\d{4}\b",
@@ -47,6 +69,7 @@ QUERY_PII_PATTERNS = {
 
 
 def mask_text_pii(text: str, prefix: str = "PII") -> Tuple[str, Dict[str, str]]:
+    """Sanitizes text by replacing PII pattern matches with privacy tokens."""
     if not text:
         return text, {}
 
@@ -70,20 +93,20 @@ def mask_text_pii(text: str, prefix: str = "PII") -> Tuple[str, Dict[str, str]]:
 
 
 def mask_query_pii(query: str) -> Tuple[str, Dict[str, str]]:
+    """Sanitizes user query string."""
     return mask_text_pii(query, prefix="Q")
 
 
 def demask_text(text: str, mapping: Dict[str, str]) -> str:
+    """Restores original PII values back into LLM responses with fuzzy token matching."""
     if not mapping or not text:
         return text
 
     demasked = text
-    # Longest token first
     for token, original in sorted(mapping.items(), key=lambda x: len(x[0]), reverse=True):
         if token in demasked:
             demasked = demasked.replace(token, str(original))
         else:
-            # Handle LLM variations: <NAME 1>, [NAME_1], NAME_1 etc.
             clean = re.escape(token.strip("<>")).replace(r"\_", r"[_\s\-]?")
             pattern = re.compile(rf"[<\[]?{clean}[>\]]?", re.IGNORECASE)
             demasked = pattern.sub(str(original), demasked)
@@ -93,34 +116,82 @@ def demask_text(text: str, mapping: Dict[str, str]) -> str:
 
 class PrivacyRAGAgent:
     """
-    Production Privacy-Preserving RAG Agent with Groq SDK / HTTP Multi-tier Generation.
-    - Query + Context sanitization (zero raw PII leaves local instance)
-    - Multi-tier generation cascade (Groq API → Local Qwen → Smart Synthesis Fallback)
-    - Full support for answer_query and answer_query_stream
+    Production Privacy-Preserving AI Document Analyst.
+    - Zero raw PII transmitted to Cloud LLMs.
+    - Document Orchestrator: Smart routing between DOCUMENT_LEVEL (Full Document) and FACT_LEVEL (Vector/Hybrid).
+    - Document Cache: In-memory cache for instant document-level summaries without vector search.
+    - Automatic Document Classification & Persona Assignment.
+    - Multi-intent support: Summary, Analysis, Compliance (DPDP), Risk, Executive Summary, QA, Comparison.
+    - Multi-tier LLM generation cascade: Groq Cloud -> Local Qwen -> Smart Synthesis Fallback.
     """
 
-    def __init__(self, model_name: str = "llama-3.3-70b-versatile", groq_api_key: Optional[str] = None, **kwargs):
+    def __init__(
+        self,
+        model_name: str = "llama-3.3-70b-versatile",
+        groq_api_key: Optional[str] = None,
+        **kwargs
+    ):
         self.model_name = MODEL_MAPPING.get(model_name, model_name)
         self.groq_api_key = groq_api_key or os.getenv("GROQ_API_KEY")
         self.current_document_id = "doc_default"
         self.file_name = "doc_default"
         self.doc_mappings: Dict[str, Dict[str, str]] = {}
         self.doc_texts: Dict[str, str] = {}
+        self.doc_classifications: Dict[str, Any] = {}
         self.masked_result = None
-        self._local_qwen_instance = None
+
+        # Initialize core AI Document Analyst & Orchestrator sub-modules
+        self.document_cache = document_cache
+        self.document_orchestrator = DocumentOrchestrator()
+        self.document_classifier = DocumentClassifier()
+        self.prompt_manager = PromptManager()
+        self.intent_classifier = IntentClassifier()
+        self.context_builder = ContextBuilder()
+        self.response_formatter = ResponseFormatter()
+        self.llm_router = LLMRouter(default_model=self.model_name)
+        self.file_name_to_doc_id: Dict[str, str] = {}
+
+    def resolve_document_id(self, document_id: Optional[str] = None) -> str:
+        """
+        Resolves provided document_id or file_name to canonical document_id stored in doc_texts and document_cache.
+        """
+        if document_id and document_id != "doc_default":
+            if hasattr(self, "file_name_to_doc_id") and document_id in self.file_name_to_doc_id:
+                return self.file_name_to_doc_id[document_id]
+            if self.document_cache:
+                cached_doc = self.document_cache.get(document_id)
+                if cached_doc:
+                    return cached_doc.document_id
+            if document_id in self.doc_texts:
+                return document_id
+
+        if self.document_cache and self.document_cache.get_latest_doc_id():
+            return self.document_cache.get_latest_doc_id()
+        if self.current_document_id and self.current_document_id != "doc_default" and self.current_document_id in self.doc_texts:
+            return self.current_document_id
+        if self.doc_texts:
+            return list(self.doc_texts.keys())[-1]
+
+        return document_id or self.current_document_id or "doc_default"
 
     def ingest_masked_result(
         self,
         masked_result: Any,
         file_name: Optional[str] = None,
         document_id: Optional[str] = None,
-        chunk_size: int = 450,
-        overlap: int = 60
+        chunk_size: int = 900,
+        overlap: int = 120
     ) -> bool:
+        """Ingests sanitized document text and mapping dictionary into cache, state, and vector store."""
         doc_id = document_id or f"doc_{int(time.time())}"
         self.current_document_id = doc_id
         self.file_name = file_name or doc_id
         self.masked_result = masked_result
+
+        if not hasattr(self, "file_name_to_doc_id"):
+            self.file_name_to_doc_id = {}
+        self.file_name_to_doc_id[self.file_name] = doc_id
+        self.file_name_to_doc_id[doc_id] = doc_id
 
         if hasattr(masked_result, "masked_text"):
             masked_text = masked_result.masked_text
@@ -133,24 +204,59 @@ class PrivacyRAGAgent:
             mapping = {}
 
         self.doc_texts[doc_id] = masked_text
+        self.doc_texts[self.file_name] = masked_text
         self.doc_mappings[doc_id] = mapping
+        self.doc_mappings[self.file_name] = mapping
+
+        # Store in DocumentCache for instant document-level context assembly
+        self.document_cache.store(
+            document_id=doc_id,
+            masked_text=masked_text,
+            mapping=mapping,
+            file_name=self.file_name
+        )
+
+        assert len(self.doc_texts[doc_id]) > 0, f"Error: Ingested document text for {doc_id} is empty!"
+
+        ingest_log = (
+            f"DOCUMENT INGESTION\n"
+            f"document_id={doc_id}\n"
+            f"file_name={self.file_name}\n"
+            f"masked_text_length={len(masked_text)}\n"
+            f"masked_text_lines={len(masked_text.splitlines()) if masked_text else 0}\n"
+            f"mapping_count={len(mapping)}"
+        )
+        logger.info(ingest_log)
+        print(ingest_log, flush=True)
+
+        ingest_id_log = f"INGEST DOCUMENT ID:\n{doc_id}"
+        logger.info(ingest_id_log)
+        print(ingest_id_log, flush=True)
+
+        # Perform automatic Document Type Classification & Persona Assignment
+        cls_result = DocumentClassifier.classify(masked_text)
+        self.doc_classifications[doc_id] = cls_result
 
         chunks = self._chunk_text(masked_text, chunk_size=chunk_size, overlap=overlap)
 
         if vector_store_manager:
-            for idx, chk in enumerate(chunks, start=1):
-                emb = generate_text_embedding(chk)
-                vector_store_manager.store_sanitized_chunk(
-                    document_id=doc_id,
-                    text=chk,
-                    embedding_vector=emb,
-                    page_ref=str(idx)
-                )
+            try:
+                for idx, chk in enumerate(chunks, start=1):
+                    emb = generate_text_embedding(chk)
+                    vector_store_manager.store_sanitized_chunk(
+                        document_id=doc_id,
+                        text=chk,
+                        embedding_vector=emb,
+                        page_ref=str(idx)
+                    )
+            except Exception as e:
+                logger.warning(f"Vector store chunk indexing notice: {e}")
 
-        logger.info(f"Ingested document {doc_id} → {len(chunks)} chunks")
+        logger.info(f"Ingested document {doc_id} ({cls_result.doc_type} / Persona: {cls_result.persona}) -> {len(chunks)} chunks")
         return True
 
     def _chunk_text(self, text: str, chunk_size: int = 450, overlap: int = 60) -> List[str]:
+        """Splits document text into overlapping paragraph-aware chunks."""
         if not text:
             return []
         if len(text) <= chunk_size:
@@ -185,279 +291,204 @@ class PrivacyRAGAgent:
 
         return chunks or [text]
 
-    def _build_system_prompt(self, context: str) -> str:
-        system_prompt = (
-            "You are PrivacyShield AI, a helpful and privacy-preserving AI assistant.\n"
-            "Answer the user's question accurately using the provided document context (if available) and the ongoing conversation history.\n"
-            "If the user refers to information provided in earlier chat messages (such as an introduction, draft, or previous statement), use that information from the conversation history.\n"
-            "The context and text may contain masked privacy tokens like <NAME_1>, <PAN_1>, <PHONE_1>, <ADDRESS_1>, <MONEY_1>, <EMAIL_1>, <ORG_1>, <AADHAAR_1>, <GSTIN_1>, <UPI_1>.\n"
-            "Do NOT try to invent missing personal data. Keep masked tokens like <NAME_1> intact in your response.\n"
-            "Synthesize a clear, well-structured answer using markdown formatting."
-        )
-
-        if context and context != "No matching document context found.":
-            system_prompt += f"\n\n[Document Context]:\n{context}"
-
-        return system_prompt
-
-    def _build_messages(self, system_prompt: str, query: str, history: Optional[List[Dict[str, str]]] = None) -> List[Dict[str, str]]:
-        messages = [{"role": "system", "content": system_prompt}]
-
-        if history:
-            for msg in history[-10:]:
-                if isinstance(msg, dict) and msg.get("role") and msg.get("content"):
-                    r = msg["role"]
-                    c = str(msg["content"]).strip()
-                    if r in ["user", "assistant"] and c:
-                        messages.append({"role": r, "content": c})
-
-        messages.append({"role": "user", "content": query})
-        return messages
-
-    def _try_groq_api(
-        self,
-        api_key: str,
-        model_name: str,
-        context: str,
-        query: str,
-        history: Optional[List[Dict[str, str]]] = None,
-        temperature: float = 0.15,
-        max_tokens: int = 1024,
-        top_p: float = 0.9
-    ) -> Optional[str]:
-        target_model = MODEL_MAPPING.get(model_name, model_name)
-        system_prompt = self._build_system_prompt(context)
-        messages = self._build_messages(system_prompt, query, history)
-
-        # 1. Try official Groq SDK first
-        if HAS_GROQ_SDK:
-            try:
-                client = Groq(api_key=api_key.strip())
-                completion = client.chat.completions.create(
-                    model=target_model,
-                    messages=messages,
-                    temperature=max(0.05, min(temperature, 0.7)),
-                    max_tokens=max_tokens,
-                    top_p=top_p
-                )
-                if completion and completion.choices and completion.choices[0].message:
-                    content = completion.choices[0].message.content
-                    if content and content.strip():
-                        return content.strip()
-            except Exception as e:
-                logger.warning(f"Groq SDK call notice: {e}. Trying HTTP fallback.")
-
-        # 2. Try HTTP API Fallback via httpx
-        try:
-            import httpx
-
-            payload = {
-                "model": target_model,
-                "messages": messages,
-                "temperature": max(0.05, min(temperature, 0.7)),
-                "max_tokens": max_tokens,
-                "top_p": top_p
-            }
-
-            resp = httpx.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {api_key.strip()}",
-                    "Content-Type": "application/json"
-                },
-                timeout=20.0
-            )
-
-            if resp.status_code == 200:
-                content = resp.json()["choices"][0]["message"]["content"].strip()
-                return content if content else None
-            else:
-                logger.warning(f"Groq HTTP error {resp.status_code}: {resp.text[:200]}")
-
-        except Exception as e:
-            logger.warning(f"Groq HTTP call failed: {e}")
-
-        return None
-
-    def _try_local_qwen(self, prompt: str, max_tokens: int = 512, temperature: float = 0.2) -> Optional[str]:
-        try:
-            if self._local_qwen_instance is None:
-                try:
-                    from app.agents.llms.qwen import QwenLLM
-                    self._local_qwen_instance = QwenLLM()
-                except Exception:
-                    try:
-                        from pii_detector.llms.qwen import QwenLLM
-                        self._local_qwen_instance = QwenLLM()
-                    except Exception:
-                        self._local_qwen_instance = False
-
-            if self._local_qwen_instance:
-                return self._local_qwen_instance.generate(
-                    prompt=prompt,
-                    max_tokens=max_tokens,
-                    temperature=temperature
-                )
-        except Exception as e:
-            logger.warning(f"Local Qwen failed: {e}")
-        return None
-
-    def _smart_synthesis_fallback(self, query: str, context_block: str, is_summary: bool) -> str:
-        if not context_block or "No matching document context" in context_block:
-            return "No relevant document context is available. Please make sure a document has been ingested first."
-
-        lines = [ln.strip() for ln in context_block.splitlines() if ln.strip()]
-        clean_lines = []
-        seen = set()
-        for ln in lines:
-            key = ln.lower()[:80]
-            if key not in seen and len(ln) > 15:
-                clean_lines.append(ln)
-                seen.add(key)
-
-        if is_summary:
-            points = clean_lines[:12]
-            body = "\n".join(f"• {p}" for p in points)
-            return (
-                f"### Document Summary\n\n"
-                f"{body}\n\n"
-                f"---\n"
-                f"*All sensitive identifiers remain masked for privacy.*"
-            )
-
-        q_terms = set(re.findall(r'\w+', query.lower())) - {
-            "what", "is", "the", "a", "an", "of", "in", "to", "for", "and", "or", "please", "tell", "me", "about"
-        }
-        scored = []
-        for ln in clean_lines:
-            score = len(q_terms & set(re.findall(r'\w+', ln.lower())))
-            scored.append((score, ln))
-
-        scored.sort(reverse=True)
-        top = [ln for score, ln in scored if score > 0][:8] or clean_lines[:6]
-
-        body = "\n".join(f"• {t}" for t in top)
-        return (
-            f"### Answer\n\n"
-            f"**Question:** {query}\n\n"
-            f"{body}\n\n"
-            f"---\n"
-            f"*Response generated from sanitized document context.*"
-        )
-
     def answer_query(
         self,
         user_query: str,
         document_id: Optional[str] = None,
         groq_api_key: Optional[str] = None,
         temperature: float = 0.15,
-        max_tokens: int = 1024,
+        max_tokens: int = 4096,
         top_p: float = 0.9,
         model_name: Optional[str] = None,
         history: Optional[List[Dict[str, str]]] = None,
-        top_k: int = 4,
+        top_k: int = 12,
         **kwargs
     ) -> Dict[str, Any]:
+        """
+        Executes end-to-end AI Document Analyst query pipeline:
+        1. Strict Document Scope Selection
+        2. Query PII Masking
+        3. Intent Classification
+        4. Document Orchestration (DOCUMENT_LEVEL vs FACT_LEVEL strategy)
+        5. Multi-Strategy Context Building
+        6. Persona & CoT Prompt Assembly
+        7. Multi-Tier LLM Generation Cascade
+        8. Response Formatter & Quality Review Self-Correction
+        9. PII Token De-masking
+        """
+        target_doc_id = self.resolve_document_id(document_id)
+        chat_id_log = f"CHAT DOCUMENT ID:\n{target_doc_id}"
+        logger.info(chat_id_log)
+        print(chat_id_log, flush=True)
 
-        target_doc_id = document_id or self.current_document_id
-        if target_doc_id not in self.doc_texts and self.doc_texts:
-            target_doc_id = list(self.doc_texts.keys())[-1]
+        # 1. Document Classification & Persona Lookup
+        doc_text = self.document_cache.get_full_text(target_doc_id) or self.doc_texts.get(target_doc_id, "")
+        cls_info = self.doc_classifications.get(target_doc_id)
+        if not cls_info:
+            cls_info = DocumentClassifier.classify(doc_text)
+            self.doc_classifications[target_doc_id] = cls_info
 
+        doc_type = cls_info.doc_type
+        persona = cls_info.persona
+
+        # Active PII token mapping dictionary
         active_mapping = dict(self.doc_mappings.get(target_doc_id, {}))
+        if self.document_cache.has_document(target_doc_id):
+            active_mapping.update(self.document_cache.get_mapping(target_doc_id))
         if self.masked_result and getattr(self.masked_result, "mapping", None):
             active_mapping.update(self.masked_result.mapping)
 
-        # 1. Mask the user query
+        # 2. Mask user query PII
         masked_query, query_mapping = mask_query_pii(user_query)
         active_mapping.update(query_mapping)
 
-        # 2. Retrieve context chunks
-        retrieved_chunks = []
-        if vector_store_manager:
-            retrieved_chunks = vector_store_manager.search_similar_chunks(
-                query_text=masked_query,
-                document_id=target_doc_id,
-                top_k=top_k
-            )
+        # 3. Intent Classification
+        intent_res = IntentClassifier.classify(masked_query)
+        intent = intent_res.intent
 
-        if not retrieved_chunks and target_doc_id in self.doc_texts:
-            full = self.doc_texts[target_doc_id]
-            retrieved_chunks = [
-                {"chunk_id": f"fallback_{i}", "text": full[i:i+450]}
-                for i in range(0, min(len(full), 1800), 450)
-            ]
+        # 4. Document Orchestration (DOCUMENT_LEVEL vs FACT_LEVEL strategy selection)
+        orchestration_plan = DocumentOrchestrator.orchestrate(
+            query=masked_query,
+            intent=intent,
+            has_active_document=bool(target_doc_id and doc_text)
+        )
 
-        context_texts = [c.get("text", "") for c in retrieved_chunks if c.get("text")]
-        context_block = "\n\n".join(context_texts) if context_texts else "No matching document context found."
+        # 5. Build context using selected orchestration strategy (FULL_DOCUMENT, SEMANTIC_RETRIEVAL, or HYBRID)
+        context_res = ContextBuilder.build_context(
+            intent=intent,
+            query=masked_query,
+            document_id=target_doc_id,
+            doc_texts=self.doc_texts,
+            vector_store_manager=vector_store_manager,
+            top_k=top_k,
+            context_strategy=orchestration_plan.context_strategy
+        )
+        context_block = context_res.context_block
+        retrieved_chunks = context_res.retrieved_chunks
+        retrieval_confidence = context_res.retrieval_confidence
+        source_attributions = context_res.source_attributions
 
-        # 3. Extra sanitization of context (safety net)
-        if context_block != "No matching document context found.":
+        # Log pipeline orchestration details
+        cache_status = "HIT" if (self.document_cache and self.document_cache.has_document(target_doc_id)) else "MISS"
+        chunks_count = 0 if context_res.is_full_document else len(retrieved_chunks)
+        logger.info(
+            f"[ORCHESTRATION PIPELINE] Intent: {intent.upper()} | "
+            f"Strategy: {context_res.context_strategy_used} | "
+            f"Chunks Retrieved: {chunks_count} | "
+            f"Document Cache: {cache_status} | "
+            f"Context Size: {len(context_block)} characters | "
+            f"Confidence: {retrieval_confidence}"
+        )
+
+        # Safety net sanitization on retrieved context
+        if context_block and context_block not in ["No matching document context found.", "No document has been ingested."]:
             context_block, extra_map = mask_text_pii(context_block, prefix="CTX")
             active_mapping.update(extra_map)
 
-        # Intent detection
-        lower_q = masked_query.lower()
-        is_summary = any(k in lower_q for k in [
-            "summarize", "summary", "overview", "tl;dr", "synopsis", "describe the document", "what is this document"
-        ])
+        # 6. Assemble chat messages with persona & reasoning prompts
+        messages = PromptManager.build_messages(
+            intent=intent,
+            context=context_block,
+            query=masked_query,
+            doc_type=doc_type,
+            persona=persona,
+            history=history
+        )
 
-        # 4. Multi-tier generation cascade
+        # 7. Route generation to LLM (Groq -> Local Qwen -> Smart Synthesis)
         requested_model = model_name or self.model_name
         target_model = MODEL_MAPPING.get(requested_model, requested_model)
-        masked_response = None
-        engine_used = "Unknown"
+        active_api_key = groq_api_key or self.groq_api_key or os.getenv("GROQ_API_KEY")
 
-        # Tier 1 - Groq Cloud API
-        api_key = groq_api_key or self.groq_api_key or os.getenv("GROQ_API_KEY")
-        if api_key and len(api_key.strip()) > 10:
-            masked_response = self._try_groq_api(
-                api_key=api_key,
-                model_name=target_model,
-                context=context_block,
-                query=masked_query,
-                history=history,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                top_p=top_p
-            )
-            if masked_response:
-                engine_used = f"Groq ({target_model})"
+        # VERIFY CONTEXT BEFORE LLM (REQUIRED LOGS)
+        first_200 = context_block[:200] if context_block else ""
+        last_200 = context_block[-200:] if context_block and len(context_block) > 200 else first_200
+        context_lines = len(context_block.splitlines()) if context_block else 0
+        document_cache_hit = "TRUE" if (self.document_cache and self.document_cache.has_document(target_doc_id)) else "FALSE"
+        retrieved_chunks_count = 0 if context_res.is_full_document else len(retrieved_chunks)
 
-        # Tier 2 - Local Qwen
-        if not masked_response:
-            prompt = f"Context:\n{context_block}\n\nQuestion: {masked_query}\n\nAnswer clearly:"
-            masked_response = self._try_local_qwen(prompt, max_tokens=max_tokens, temperature=temperature)
-            if masked_response:
-                engine_used = "Local Qwen"
+        llm_debug_log = (
+            f"LLM CONTEXT DEBUG\n"
+            f"document_id={target_doc_id}\n"
+            f"intent={intent}\n"
+            f"context_strategy={context_res.context_strategy_used}\n"
+            f"context_length={len(context_block)}\n"
+            f"context_lines={context_lines}\n"
+            f"retrieved_chunks={retrieved_chunks_count}\n"
+            f"document_cache_hit={document_cache_hit}\n"
+            f"provider=Groq\n"
+            f"model={target_model}\n"
+            f"context_head_200={first_200!r}\n"
+            f"context_tail_200={last_200!r}"
+        )
+        logger.info(llm_debug_log)
+        print(llm_debug_log, flush=True)
 
-        # Tier 3 - Smart Synthesis Engine Fallback
-        if not masked_response:
-            engine_used = "Smart Synthesis Engine"
-            masked_response = self._smart_synthesis_fallback(
-                query=masked_query,
-                context_block=context_block,
-                is_summary=is_summary
-            )
+        llm_res = self.llm_router.generate(
+            messages=messages,
+            model_name=target_model,
+            groq_api_key=active_api_key,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            intent=intent,
+            query=masked_query,
+            context=context_block
+        )
 
-        # 5. Demask output
-        final_answer = demask_text(masked_response, active_mapping)
+        raw_masked_response = llm_res.content
+        engine_used = llm_res.engine_used
+        provider_used = getattr(llm_res, "provider_used", "Groq")
+        routing_strategy = getattr(llm_res, "routing_strategy", "Cloud")
+        fallback_reason = getattr(llm_res, "fallback_reason", None)
+        latency_ms = getattr(llm_res, "latency_ms", 0)
+        request_id = getattr(llm_res, "request_id", "")
+
+        # 8. Quality Review Self-Correction & Response Formatting
+        formatted_masked_response = ResponseFormatter.format_response(
+            raw_text=raw_masked_response,
+            intent=intent,
+            query=user_query,
+            confidence=retrieval_confidence
+        )
+
+        # Append source attributions for specific factual queries
+        if source_attributions and intent in ["analysis", "compliance", "detailed_summary"] and not context_res.is_full_document:
+            formatted_masked_response += f"\n\n_{source_attributions[0]}_"
+
+        # 9. Demask PII tokens back to original values for the user
+        final_answer = demask_text(formatted_masked_response, active_mapping)
 
         return {
             "query": user_query,
             "masked_query_used": masked_query,
             "masked_context": context_block,
             "masked_context_sent_to_cloud": context_block,
-            "masked_response": masked_response,
-            "cloud_llm_masked_response": masked_response,
+            "masked_response": formatted_masked_response,
+            "cloud_llm_masked_response": formatted_masked_response,
             "unmasked_response": final_answer,
             "final_unmasked_answer": final_answer,
             "model": target_model,
             "model_used": engine_used,
+            "provider_used": provider_used,
+            "routing_strategy": routing_strategy,
+            "fallback_reason": fallback_reason,
+            "latency_ms": latency_ms,
+            "request_id": request_id,
             "mapping": active_mapping,
             "file_name": self.file_name,
             "sources_retrieved": [c.get("chunk_id", f"chunk_{i}") for i, c in enumerate(retrieved_chunks)],
             "privacy_guarantee": "Zero raw PII transmitted to Groq cloud API",
+            "intent": intent,
+            "intent_confidence": intent_res.confidence,
+            "intent_reasoning": intent_res.reasoning,
+            "query_scope": orchestration_plan.query_scope,
+            "context_strategy_used": context_res.context_strategy_used,
+            "bypassed_vector_search": orchestration_plan.bypass_vector_search,
+            "doc_type": doc_type,
+            "persona": persona,
+            "retrieval_confidence": retrieval_confidence,
+            "source_attributions": source_attributions,
         }
 
     def answer_query_stream(
@@ -472,59 +503,100 @@ class PrivacyRAGAgent:
         history: Optional[List[Dict[str, str]]] = None,
         top_k: int = 4
     ):
+        """Streaming execution pipeline returning Groq stream and context metadata."""
         api_key = groq_api_key or self.groq_api_key or os.getenv("GROQ_API_KEY")
         if not api_key:
             raise ValueError("Groq API Key is missing. Please set GROQ_API_KEY environment variable or pass groq_api_key.")
 
-        requested_model = model_name or self.model_name
-        target_model = MODEL_MAPPING.get(requested_model, requested_model)
+        target_doc_id = self.resolve_document_id(document_id)
+        chat_id_log = f"CHAT DOCUMENT ID:\n{target_doc_id}"
+        logger.info(chat_id_log)
+        print(chat_id_log, flush=True)
 
-        target_doc_id = document_id or self.current_document_id
-        if target_doc_id not in self.doc_texts and self.doc_texts:
-            target_doc_id = list(self.doc_texts.keys())[-1]
+        doc_text = self.document_cache.get_full_text(target_doc_id) or self.doc_texts.get(target_doc_id, "")
+        cls_info = self.doc_classifications.get(target_doc_id)
+        if not cls_info:
+            cls_info = DocumentClassifier.classify(doc_text)
+            self.doc_classifications[target_doc_id] = cls_info
+
+        doc_type = cls_info.doc_type
+        persona = cls_info.persona
 
         active_mapping = dict(self.doc_mappings.get(target_doc_id, {}))
+        if self.document_cache.has_document(target_doc_id):
+            active_mapping.update(self.document_cache.get_mapping(target_doc_id))
         if self.masked_result and getattr(self.masked_result, "mapping", None):
             active_mapping.update(self.masked_result.mapping)
 
         masked_query, query_mapping = mask_query_pii(user_query)
         active_mapping.update(query_mapping)
 
-        retrieved_chunks = []
-        if vector_store_manager:
-            retrieved_chunks = vector_store_manager.search_similar_chunks(
-                query_text=masked_query,
-                document_id=target_doc_id,
-                top_k=top_k
-            )
+        intent_res = IntentClassifier.classify(masked_query)
+        intent = intent_res.intent
 
-        if not retrieved_chunks and target_doc_id in self.doc_texts:
-            full = self.doc_texts[target_doc_id]
-            retrieved_chunks = [
-                {"chunk_id": f"fallback_{i}", "text": full[i:i+450]}
-                for i in range(0, min(len(full), 1800), 450)
-            ]
+        orchestration_plan = DocumentOrchestrator.orchestrate(
+            query=masked_query,
+            intent=intent,
+            has_active_document=bool(target_doc_id and doc_text)
+        )
 
-        context_texts = [c.get("text", "") for c in retrieved_chunks if c.get("text")]
-        context_block = "\n\n".join(context_texts) if context_texts else "No matching document context found."
+        context_res = ContextBuilder.build_context(
+            intent=intent,
+            query=masked_query,
+            document_id=target_doc_id,
+            doc_texts=self.doc_texts,
+            vector_store_manager=vector_store_manager,
+            top_k=top_k,
+            context_strategy=orchestration_plan.context_strategy
+        )
+        context_block = context_res.context_block
 
-        if context_block != "No matching document context found.":
+        if context_block and context_block not in ["No matching document context found.", "No document has been ingested."]:
             context_block, extra_map = mask_text_pii(context_block, prefix="CTX")
             active_mapping.update(extra_map)
 
-        system_prompt = self._build_system_prompt(context_block)
-        messages = self._build_messages(system_prompt, masked_query, history)
+        messages = PromptManager.build_messages(
+            intent=intent,
+            context=context_block,
+            query=masked_query,
+            doc_type=doc_type,
+            persona=persona,
+            history=history
+        )
 
-        if HAS_GROQ_SDK:
-            client = Groq(api_key=api_key.strip())
-            stream = client.chat.completions.create(
-                model=target_model,
-                messages=messages,
-                temperature=float(temperature),
-                max_tokens=int(max_tokens),
-                top_p=float(top_p),
-                stream=True
-            )
-            return stream, context_block, target_model, active_mapping
-        else:
-            raise RuntimeError("Groq SDK is not installed. Please install groq to use answer_query_stream.")
+        requested_model = model_name or self.model_name
+        target_model = MODEL_MAPPING.get(requested_model, requested_model)
+
+        first_200 = context_block[:200] if context_block else ""
+        last_200 = context_block[-200:] if context_block and len(context_block) > 200 else first_200
+        context_lines = len(context_block.splitlines()) if context_block else 0
+        document_cache_hit = "TRUE" if (self.document_cache and self.document_cache.has_document(target_doc_id)) else "FALSE"
+        retrieved_chunks_count = 0 if context_res.is_full_document else len(context_res.retrieved_chunks)
+
+        llm_debug_log = (
+            f"LLM CONTEXT DEBUG\n"
+            f"document_id={target_doc_id}\n"
+            f"intent={intent}\n"
+            f"context_strategy={context_res.context_strategy_used}\n"
+            f"context_length={len(context_block)}\n"
+            f"context_lines={context_lines}\n"
+            f"retrieved_chunks={retrieved_chunks_count}\n"
+            f"document_cache_hit={document_cache_hit}\n"
+            f"provider=Groq\n"
+            f"model={target_model}\n"
+            f"context_head_200={first_200!r}\n"
+            f"context_tail_200={last_200!r}"
+        )
+        logger.info(llm_debug_log)
+        print(llm_debug_log, flush=True)
+
+        stream, target_model = self.llm_router.generate_stream(
+            messages=messages,
+            model_name=target_model,
+            groq_api_key=api_key,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p
+        )
+
+        return stream, context_block, target_model, active_mapping

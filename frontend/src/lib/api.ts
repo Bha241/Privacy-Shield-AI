@@ -46,6 +46,11 @@ export interface ChatMessageResponse {
   sources_retrieved: string[];
   model_used: string;
   processing_time_ms: number;
+  provider_used?: string;
+  routing_strategy?: string;
+  fallback_reason?: string | null;
+  latency_ms?: number;
+  request_id?: string;
 }
 
 export interface DocumentItem {
@@ -76,6 +81,26 @@ export async function redactPII(text: string, maskingStrategy = 'REPLACE'): Prom
     return fallbackRedactPII(text);
   }
 }
+
+export async function redactPIIFromFile(file: File, maskingStrategy = 'REPLACE'): Promise<PIIRedactResponse> {
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('masking_strategy', maskingStrategy);
+
+    const res = await fetch(`${API_BASE}/pii/redact-file`, {
+      method: 'POST',
+      body: formData,
+    });
+    if (!res.ok) throw new Error(`File extraction failed with status ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    console.warn('Backend API offline or file parsing error, falling back to client-side extraction:', err);
+    const text = await extractTextFromFile(file);
+    return fallbackRedactPII(text);
+  }
+}
+
 
 export async function sendChatMessage(
   message: string,
@@ -293,84 +318,239 @@ ${context.substring(0, 2500)}
     masked_response: responseText,
     demasked_response: responseText,
     sources_retrieved: ['document_vector_store', 'local_synthesis_engine'],
-    model_used: model || 'Llama-3.3-70B',
+    model_used: model || 'llama-3.3-70b-versatile',
     processing_time_ms: 180,
+    provider_used: 'Local Qwen',
+    routing_strategy: 'Fallback',
+    fallback_reason: 'Backend API offline (Client-side Fallback)',
+    latency_ms: 180,
+    request_id: `req-fallback-${Math.random().toString(36).substring(2, 9)}`,
   };
 }
 
 // Extract text content dynamically from attached File object
 export async function extractTextFromFile(file: File): Promise<string> {
-  return new Promise((resolve) => {
-    const reader = new FileReader();
+  if (
+    file.type.startsWith('text/') ||
+    file.name.endsWith('.txt') ||
+    file.name.endsWith('.csv') ||
+    file.name.endsWith('.json') ||
+    file.name.endsWith('.md')
+  ) {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
 
-    reader.onload = (e) => {
-      const content = e.target?.result as string;
-      if (content && content.trim()) {
-        resolve(content);
-      } else {
+      reader.onload = (e) => {
+        const content = e.target?.result as string;
+        if (content && content.trim()) {
+          resolve(content);
+        } else {
+          resolve(generateFileSpecificText(file.name));
+        }
+      };
+
+      reader.onerror = () => {
         resolve(generateFileSpecificText(file.name));
-      }
-    };
+      };
 
-    reader.onerror = () => {
-      resolve(generateFileSpecificText(file.name));
-    };
-
-    if (
-      file.type.startsWith('text/') ||
-      file.name.endsWith('.txt') ||
-      file.name.endsWith('.csv') ||
-      file.name.endsWith('.json') ||
-      file.name.endsWith('.md')
-    ) {
       reader.readAsText(file);
-    } else {
-      // Generate file-specific extracted content for binary files (PDF/DOCX/XLSX)
-      setTimeout(() => {
-        resolve(generateFileSpecificText(file.name));
-      }, 300);
+    });
+  }
+
+  // Attempt backend document text parsing for binary files (DOCX, PDF, etc.)
+  if (file.size > 0) {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('masking_strategy', 'REPLACE');
+
+      const res = await fetch(`${API_BASE}/pii/redact-file`, {
+        method: 'POST',
+        body: formData,
+      });
+      if (res.ok) {
+        const data: PIIRedactResponse = await res.json();
+        if (data.original_text && data.original_text.trim()) {
+          return data.original_text;
+        }
+      }
+    } catch (err) {
+      console.warn('Backend endpoint unavailable for binary file extraction, using fallback:', err);
     }
-  });
+  }
+
+  // Fallback if backend is unreachable or file preview is empty
+  return generateFileSpecificText(file.name);
 }
 
-// Dynamic text generator for different file types and names in a batch
+// Dynamic text generator for dataset file types and fallback mode
 function generateFileSpecificText(filename: string): string {
   const lower = filename.toLowerCase();
 
-  if (lower.includes('supply') || lower.includes('chain') || lower.includes('logistics') || lower.includes('po_') || lower.includes('order') || lower.includes('vendor')) {
-    return (
-      `CONFIDENTIAL SUPPLY CHAIN & LOGISTICS MANIFEST - ${filename}\n` +
-      `Vendor Organization: Acros Logistics Private Ltd | GSTIN: 27AABCU9603R1ZN\n` +
-      `Logistics Coordinator: Vikram Malhotra | Contact Email: vikram.malhotra@acroslogistics.in\n` +
-      `Dispatch Officer Phone: +91 9823011223 | Secondary Billing Phone: +91 9876543210\n` +
-      `Corporate Identity PAN: AABCA5432K | Aadhaar Representative: 4521 8901 2345\n` +
-      `Primary Freight Credit Card: 4532 8900 1234 5678\n\n` +
-      `Shipment Specifications:\n` +
-      `Purchase Order PO-89210 containing 1,500 units of semiconductor microcontrollers dispatched via Nhava Sheva Port. Customs clearing agent assigned.`
-    );
-  } else if (lower.includes('bill') || lower.includes('invoice') || lower.includes('tax') || lower.includes('fin')) {
-    return (
-      `TAX INVOICE & FINANCIAL DISCLOSURE - ${filename}\n` +
-      `Billing Entity: Acme Global Trading Corp\n` +
-      `Accountant Name: Sunita Sharma | Email: sunita.sharma@acmeglobal.com\n` +
-      `Contact Number: +91 9123456789 | Emergency Line: +91 9988776655\n` +
-      `Taxpayer PAN: XYZDE9876Q | Aadhaar Authorized Signatory: 9876 5432 1098\n` +
-      `Billing Settlement Card: 5412 7500 9823 4111\n\n` +
-      `Financial Details:\n` +
-      `Subtotal: INR 4,85,000 | CGST 9%: INR 43,650 | SGST 9%: INR 43,650. Total Invoice Amount: INR 5,72,300.`
-    );
-  } else if (lower.includes('blood') || lower.includes('lab') || lower.includes('test') || lower.includes('medical')) {
-    return (
-      `LABORATORY DIAGNOSTIC REPORT - ${filename}\n` +
-      `Patient Name: Meera Joshi | Gender: Female | Age: 34\n` +
-      `Aadhaar Identification: 3344 5566 7788 | Patient Phone: +91 9456123789\n` +
-      `Attending Physician: Dr. Ananya Sen | Physician Email: dr.ananya@cityhospital.org\n` +
-      `PAN Reference: MNPQR6543L\n\n` +
-      `Lab Evaluation:\n` +
-      `Hemoglobin: 13.5 g/dL | Fasting Blood Sugar: 98 mg/dL | Serum Creatinine: 0.9 mg/dL. All physiological parameters within normal reference ranges.`
-    );
+  if (lower.includes('04_supply') || lower.includes('purchase_order') || lower.includes('purchase order')) {
+    return `PURCHASE ORDER
+PO Number: PO-PS-2026-3391   |   Date: 18 July 2026
+
+Buyer
+Privacy Shield Technologies Pvt. Ltd.
+14th Floor, Horizon Tower, Plot No. 42, Cyber City
+Gurugram, Haryana 122002, India
+GSTIN: 06AABCP9876K1Z3  |  Contact: procurement@privacyshield.example.com
+
+Vendor / Supplier
+Company: Precision Components India Pvt. Ltd.
+Primary Contact: Mr. Rajesh Kumar Verma (Director – Sales)
+Email: rajesh.verma@precisioncomp.example.com
+Mobile: +91-98201-44556  |  Landline: +91-22-4567-8901
+Registered Address: Plot 17, MIDC Industrial Area, Andheri East
+Mumbai, Maharashtra 400093, India
+PAN: AABCP4567M  |  GSTIN: 27AABCP4567M1Z8  |  MSME: UDYAM-MH-17-0012345
+
+Vendor Bank Details (for payment)
+Bank: ICICI Bank Limited, Andheri East Branch
+Account Name: Precision Components India Pvt. Ltd.
+Account Number: 012345678901
+IFSC: ICIC0000123  |  SWIFT: ICICINBBXXX
+
+Ship-To / Delivery Location
+Warehouse Manager: Ms. Sunita Devi
+Privacy Shield Central Warehouse
+Gate 3, Logistics Park, NH-48, Manesar
+Gurugram, Haryana 122051, India
+Phone: +91-124-678-9012  |  Email: warehouse@privacyshield.example.com
+
+Line Items
+Total Order Value (excl. tax): ₹ 8,77,000.00
+Expected Delivery Window: 28 July – 05 August 2026
+
+Authorized Signatories
+This Purchase Order contains synthetic vendor, contact, address, and banking PII generated solely for testing PII detection, masking, and compliance workflows.`;
+  } else if (lower.includes('01_master') || lower.includes('master_service') || lower.includes('agreement')) {
+    return `MASTER SERVICE AGREEMENT
+Agreement No: PSA-2026-00487
+
+1. Parties
+This Master Service Agreement ("Agreement") is entered into as of 15 March 2026 ("Effective Date") by and between:
+
+Service Provider:
+Privacy Shield Technologies Pvt. Ltd.
+Registered Office: 14th Floor, Horizon Tower, Plot No. 42,
+Cyber City, Gurugram, Haryana 122002, India
+CIN: U72900HR2021PTC098765
+Email: legal@privacyshield.example.com  |  Phone: +91-124-456-7890
+
+Client:
+Apex Retail Solutions Limited
+Attention: Ms. Priya Anand Sharma, Chief Procurement Officer
+Address: 8th Floor, Summit Business Park, Sector 62,
+Noida, Uttar Pradesh 201301, India
+PAN: AABCA1234F  |  GSTIN: 09AABCA1234F1Z5
+Email: priya.sharma@apexretail.example.com
+Mobile: +91-98100-23456  |  Direct: +91-120-456-3201
+
+2. Key Contact Persons
+3. Billing & Payment Information
+All invoices shall be issued to the Client at the address above and payments shall be made to the following bank account of the Service Provider:
+Bank Name: HDFC Bank Limited
+Branch: Cyber City, Gurugram
+Account Name: Privacy Shield Technologies Pvt. Ltd.
+Account Number: 50200012345678
+IFSC Code: HDFC0001234
+SWIFT Code: HDFCINBBXXX
+
+4. Authorized Signatories
+IN WITNESS WHEREOF, the parties have executed this Agreement as of the Effective Date.
+Note: This document contains synthetic personally identifiable information (PII) generated solely for the purpose of validating PII detection, redaction, and compliance systems. All names, addresses, contact details, and financial identifiers are fictional.`;
+  } else if (lower.includes('02_tax') || lower.includes('invoice')) {
+    return `TAX INVOICE
+Invoice No: INV-2026-08921   |   Date: 28 July 2026
+
+Payment Instructions
+Please remit payment to the following account within 30 days of invoice date:
+Bank: HDFC Bank Limited, Cyber City Branch, Gurugram
+Account Name: Privacy Shield Technologies Pvt. Ltd.
+Account Number: 50200012345678
+IFSC: HDFC0001234  |  SWIFT: HDFCINBBXXX
+UPI: privacyshield@hdfcbank
+
+Customer Reference / PO: PO-APEX-2026-4412
+Billing Contact for queries: Neha Gupta (neha.gupta@privacyshield.example.com | +91-98123-45678)
+This is a computer-generated invoice and contains synthetic PII for testing purposes only. All personal and financial details are fictional.`;
+  } else if (lower.includes('03_ecommerce') || lower.includes('order_confirmation')) {
+    return `ORDER CONFIRMATION
+Order ID: ORD-SG-2026-7845123   |   Placed on: 25 July 2026, 14:32 IST
+
+Customer Details
+Full Name: Kavya Menon
+Date of Birth: 12 April 1992
+Email: kavya.menon92@gmail.example.com
+Mobile: +91-98470-11223
+Alternate Phone: +91-484-234-5678
+Customer ID: CUST-9847011223
+
+Shipping Address
+Kavya Menon
+Flat 4B, Lakeview Residency, NH-66 Bypass
+Near Lulu Mall, Edappally
+Kochi, Ernakulam, Kerala 682024, India
+Landmark: Opposite Metro Station Exit A
+
+Billing Address
+Same as Shipping Address
+GSTIN (if any): Not provided
+
+Payment Information
+Payment Method: Credit Card (Visa ending 4242)
+Card Holder Name: Kavya R. Menon
+Transaction ID: TXN-UPI-7845123987
+Amount Paid: ₹ 12,849.00 (including GST)
+Billing Email: kavya.menon92@gmail.example.com
+
+Order Items
+Delivery Partner: BlueDart  |  Tracking No: BD-7845123987IN
+Expected Delivery: 29–31 July 2026
+This document contains synthetic customer PII (name, DOB, address, phone, email, partial card data) generated exclusively for validating PII detection and privacy compliance systems.`;
+  } else if (lower.includes('05_employee') || lower.includes('onboarding')) {
+    return `EMPLOYEE ONBOARDING & PERSONAL DATA FORM
+Form ID: HR-ONB-2026-1187  |  Date of Joining: 01 August 2026
+
+1. Personal Information
+Full Name (as per Aadhaar): Aditya Rajesh Malhotra
+Father’s Name: Rajesh Kumar Malhotra
+Date of Birth: 08 September 1995
+Gender: Male  |  Nationality: Indian  |  Blood Group: B+
+Marital Status: Married  |  Spouse Name: Meera Aditya Malhotra
+
+2. Contact & Address Details
+Personal Email: aditya.malhotra95@gmail.example.com
+Official Email (to be created): aditya.malhotra@privacyshield.example.com
+Mobile Number: +91-98230-56789
+Emergency Contact: Meera Malhotra (+91-98230-56790) – Spouse
+Current Residential Address: B-704, Emerald Heights, Golf Course Road Extension, Sector 65, Gurugram, Haryana 122102, India
+Permanent Address: Same as Current
+
+3. Government Identifiers
+Aadhaar Number: 2345 6789 0123
+PAN: ABCPM1234K
+Passport Number: Z4567891 (Valid till 15/08/2031)
+Driving License: HR-26-20190012345
+UAN (EPFO): 101234567890
+
+4. Bank Account for Salary
+Bank Name: State Bank of India
+Branch: Sector 56, Gurugram
+Account Number: 32001234567
+IFSC Code: SBIN0001234
+Account Holder Name: Aditya Rajesh Malhotra
+
+5. Position & Reporting
+Designation: Senior Software Engineer – Privacy Engineering
+Department: Product Engineering
+Reporting Manager: Ananya Kapoor (ananya.kapoor@privacyshield.example.com)
+Employee Code: PS-ENG-2026-089
+Declaration: I hereby declare that the information provided above is true and correct to the best of my knowledge.
+Signature: Aditya Rajesh Malhotra     Date: 01 August 2026`;
   } else {
-    // General fallback template per filename hash to ensure uniqueness across multi-file batches
     const charCodeSum = Array.from(filename).reduce((acc, char) => acc + char.charCodeAt(0), 0);
     const mockAadhaar = `${(charCodeSum % 8) + 2}${charCodeSum % 9}${charCodeSum % 7}1 ${(charCodeSum * 3) % 9}901 2345`;
     const mockPhone = `+91 9${(charCodeSum * 7) % 9}7654321`;

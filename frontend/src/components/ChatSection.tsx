@@ -31,6 +31,7 @@ import {
 import {
   sendChatMessage,
   redactPII,
+  redactPIIFromFile,
   PIIMatch,
   ChatMessageResponse,
   LLMSettings,
@@ -49,6 +50,11 @@ interface Message {
   mapping?: Record<string, string>;
   sources?: string[];
   modelUsed?: string;
+  providerUsed?: string;
+  routingStrategy?: string;
+  fallbackReason?: string | null;
+  latencyMs?: number;
+  requestId?: string;
   processingTimeMs?: number;
   viewMode?: 'masked' | 'demasked';
   timestamp: string;
@@ -127,11 +133,29 @@ export function ChatSection() {
 
       for (let idx = 0; idx < files.length; idx++) {
         const file = files[idx];
-        // Extract text content from file
-        const rawText = await extractTextFromFile(file);
+        
+        let detectionRes: PIIRedactResponse;
+        let rawText: string;
 
-        // Run automatic PII Detection
-        const detectionRes: PIIRedactResponse = await redactPII(rawText);
+        const isTextFile =
+          file.type.startsWith('text/') ||
+          file.name.endsWith('.txt') ||
+          file.name.endsWith('.csv') ||
+          file.name.endsWith('.json') ||
+          file.name.endsWith('.md');
+
+        if (!isTextFile && file.size > 0) {
+          try {
+            detectionRes = await redactPIIFromFile(file);
+            rawText = detectionRes.original_text || (await extractTextFromFile(file));
+          } catch (e) {
+            rawText = await extractTextFromFile(file);
+            detectionRes = await redactPII(rawText);
+          }
+        } else {
+          rawText = await extractTextFromFile(file);
+          detectionRes = await redactPII(rawText);
+        }
 
         // Format entities for HITL checklist
         const hitlEntities: HITLEntityItem[] = detectionRes.entities.map((ent, i) => ({
@@ -348,6 +372,11 @@ export function ChatSection() {
         mapping: activeMapping,
         sources: ragResponse.sources_retrieved,
         modelUsed: ragResponse.model_used,
+        providerUsed: ragResponse.provider_used,
+        routingStrategy: ragResponse.routing_strategy,
+        fallbackReason: ragResponse.fallback_reason,
+        latencyMs: ragResponse.latency_ms,
+        requestId: ragResponse.request_id,
         processingTimeMs: ragResponse.processing_time_ms,
         viewMode: 'demasked',
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -678,8 +707,39 @@ export function ChatSection() {
                             <Database className="h-3 w-3 text-indigo-400" />
                             <span>Context: {attachedDoc}</span>
                           </div>
-                          <div className="font-mono text-slate-400">
-                            {msg.processingTimeMs}ms · {msg.modelUsed}
+                          <div className="flex items-center gap-2 font-mono text-slate-400">
+                            <span>{msg.latencyMs || msg.processingTimeMs}ms</span>
+                            {msg.routingStrategy === 'Fallback' || msg.fallbackReason || (msg.modelUsed && msg.modelUsed.toLowerCase().includes('fallback')) ? (
+                              <div
+                                className="relative group inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-950/80 border border-amber-700 text-amber-300 font-mono text-[10px] cursor-help shadow-md"
+                                title={`Reason: ${msg.fallbackReason || 'Cloud Inference Failed'}`}
+                              >
+                                <ShieldAlert className="h-3.5 w-3.5 text-amber-400" />
+                                <span>Cloud Failed &darr; Local Qwen</span>
+                                
+                                {/* Tooltip */}
+                                <div className="absolute right-0 bottom-full mb-2 hidden group-hover:block z-50 w-64 p-2.5 rounded-xl bg-slate-950 border border-amber-800 text-slate-200 shadow-2xl text-[11px] font-sans">
+                                  <div className="font-bold text-amber-400 mb-1 flex items-center gap-1">
+                                    <AlertCircle className="h-3.5 w-3.5 text-amber-400" /> Fallback Reason
+                                  </div>
+                                  <div className="text-[10px] text-amber-200 font-mono bg-slate-900 p-1.5 rounded border border-amber-900/80 break-words">
+                                    {msg.fallbackReason || '401 Unauthorized / Connection Timeout'}
+                                  </div>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-purple-950/80 border border-purple-800 text-purple-200 font-mono text-[10px] shadow-sm">
+                                <Sparkles className="h-3 w-3 text-purple-400" />
+                                <span>
+                                  {msg.modelUsed && msg.modelUsed.toLowerCase().includes('3.1')
+                                    ? 'Cloud Llama 3.1'
+                                    : 'Cloud Llama 3.3'}
+                                </span>
+                                {msg.providerUsed && (
+                                  <span className="text-[9px] text-purple-400 font-bold">({msg.providerUsed})</span>
+                                )}
+                              </div>
+                            )}
                           </div>
                         </div>
                       </>

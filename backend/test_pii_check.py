@@ -19,14 +19,17 @@ def run_check():
     masker = MaskingAgent()
 
     sample_text = (
-        "CONFIDENTIAL SUPPLY CHAIN & LOGISTICS MANIFEST\n"
-        "Vendor Organization: Acros Logistics Private Ltd | GSTIN: 27AABCU9603R1ZN\n"
-        "Logistics Coordinator: Vikram Malhotra | Contact Email: vikram.malhotra@acroslogistics.in\n"
-        "Dispatch Officer Phone: +91 9823011223 | Secondary Billing Phone: +91 9876543210\n"
-        "Corporate Identity PAN: AABCA5432K | Aadhaar Representative: 4521 8901 2345\n"
-        "Primary Freight Credit Card: 4532 8900 1234 5678\n\n"
-        "Shipment Specifications:\n"
-        "Purchase Order PO-89210 containing 1,500 units of semiconductor microcontrollers dispatched via Nhava Sheva Port."
+        "PURCHASE ORDER\n"
+        "PO Number: PO-PS-2026-3391   |   Date: 18 July 2026\n"
+        "Buyer: Privacy Shield Technologies Pvt. Ltd.\n"
+        "GSTIN: 06AABCP9876K1Z3  |  Contact: procurement@privacyshield.example.com\n"
+        "Vendor: Precision Components India Pvt. Ltd.\n"
+        "Primary Contact: Mr. Rajesh Kumar Verma (Director – Sales)\n"
+        "Email: rajesh.verma@precisioncomp.example.com\n"
+        "Mobile: +91-98201-44556  |  Landline: +91-22-4567-8901\n"
+        "PAN: AABCP4567M  |  GSTIN: 27AABCP4567M1Z8  |  MSME: UDYAM-MH-17-0012345\n"
+        "Account Number: 012345678901  |  IFSC: ICIC0000123\n"
+        "Warehouse Manager: Ms. Sunita Devi (warehouse@privacyshield.example.com)"
     )
 
     res = agent.process_text_on_the_go(sample_text, domain="supply_chain")

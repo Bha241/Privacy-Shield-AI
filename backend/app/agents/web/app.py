@@ -558,7 +558,7 @@ async def bypass_masking_hitl(payload: Dict[str, Any] = Body(...)):
             db.close()
 
         # Ingest raw text into QnA Agent
-        get_qna_agent().ingest_masked_result(unmasked_res, file_name=file_name)
+        get_qna_agent().ingest_masked_result(unmasked_res, file_name=file_name, document_id=document_id)
 
         # Audit Event for Masking Bypass
         get_audit_agent().log_event(
@@ -594,7 +594,8 @@ async def chat_rag_qna(
     max_tokens: Optional[int] = Form(512),
     top_p: Optional[float] = Form(0.95),
     model_name: Optional[str] = Form("llama-3.1-8b-instant"),
-    history: Optional[str] = Form(None)
+    history: Optional[str] = Form(None),
+    document_id: Optional[str] = Form(None)
 ):
     qna_agent = get_qna_agent()
 
@@ -609,6 +610,7 @@ async def chat_rag_qna(
                 parsed_history = []
 
         session_domain = current_session.get("domain", "general")
+        active_doc_id = document_id or current_session.get("document_id")
         masked_query = query
         prompt_pii_entities = []
         query_mapping = {}
@@ -632,6 +634,7 @@ async def chat_rag_qna(
         # Send query with LLM hyperparameter settings & conversation history
         qna_res = qna_agent.answer_query(
             user_query=masked_query,
+            document_id=active_doc_id,
             groq_api_key=api_key,
             temperature=temperature or 0.2,
             max_tokens=max_tokens or 512,
@@ -707,7 +710,8 @@ async def chat_rag_qna_stream(
     max_tokens: Optional[int] = Form(512),
     top_p: Optional[float] = Form(0.95),
     model_name: Optional[str] = Form("llama-3.1-8b-instant"),
-    history: Optional[str] = Form(None)
+    history: Optional[str] = Form(None),
+    document_id: Optional[str] = Form(None)
 ):
     qna_agent = get_qna_agent()
 
@@ -722,6 +726,7 @@ async def chat_rag_qna_stream(
                 parsed_history = []
 
         session_domain = current_session.get("domain", "general")
+        active_doc_id = document_id or current_session.get("document_id")
         masked_query = query
         prompt_pii_entities = []
         query_mapping = {}
@@ -742,6 +747,7 @@ async def chat_rag_qna_stream(
 
         stream, masked_context, active_model = qna_agent.answer_query_stream(
             user_query=masked_query,
+            document_id=active_doc_id,
             groq_api_key=api_key,
             temperature=temperature or 0.2,
             max_tokens=max_tokens or 512,

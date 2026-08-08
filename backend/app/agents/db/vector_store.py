@@ -130,14 +130,24 @@ class VectorStoreManager:
                 if not isinstance(db_session, AsyncSession):
                     from sqlalchemy import text as sa_text
                     query_vec_str = f"[{','.join(str(x) for x in query_vector)}]"
-                    sql = sa_text("""
-                        SELECT chunk_id, document_id, text, page_ref
-                        FROM sanitized_chunks
-                        WHERE (:doc_id IS NULL OR document_id = :doc_id)
-                        ORDER BY embedding_vector <-> :vec
-                        LIMIT :k
-                    """)
-                    res = db_session.execute(sql, {"doc_id": document_id, "vec": query_vec_str, "k": top_k}).fetchall()
+                    if document_id:
+                        sql = sa_text("""
+                            SELECT chunk_id, document_id, text, page_ref
+                            FROM sanitized_chunks
+                            WHERE document_id = :doc_id
+                            ORDER BY embedding_vector <-> :vec
+                            LIMIT :k
+                        """)
+                        res = db_session.execute(sql, {"doc_id": document_id, "vec": query_vec_str, "k": top_k}).fetchall()
+                    else:
+                        sql = sa_text("""
+                            SELECT chunk_id, document_id, text, page_ref
+                            FROM sanitized_chunks
+                            ORDER BY embedding_vector <-> :vec
+                            LIMIT :k
+                        """)
+                        res = db_session.execute(sql, {"vec": query_vec_str, "k": top_k}).fetchall()
+
                     if res:
                         return [
                             {
@@ -156,11 +166,14 @@ class VectorStoreManager:
         q_vec = np.array(query_vector, dtype=np.float32)
         norm_q = np.linalg.norm(q_vec)
 
-        candidates = self.chunks_cache
+        # STRICT DOCUMENT ISOLATION: If document_id is provided, search ONLY chunks for that document_id
         if document_id:
-            doc_filtered = [c for c in self.chunks_cache if c.get("document_id") == document_id]
-            if doc_filtered:
-                candidates = doc_filtered
+            candidates = [c for c in self.chunks_cache if c.get("document_id") == document_id]
+        else:
+            candidates = self.chunks_cache
+
+        if not candidates:
+            return []
 
         # Prepare tokens for keyword overlap scoring
         query_words = set(re.findall(r'\w+', (query_text or "").lower())) if query_text else set()
