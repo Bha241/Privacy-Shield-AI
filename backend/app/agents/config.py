@@ -4,6 +4,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Project root (pii-detector/)
 BASE_DIR = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 import torch
 
@@ -35,12 +36,12 @@ from urllib.parse import quote_plus
 # Try loading .env file from project root if python-dotenv is installed
 try:
     from dotenv import load_dotenv
-    env_path = BASE_DIR / ".env"
+    env_path = PROJECT_ROOT / ".env"
     if env_path.exists():
         load_dotenv(dotenv_path=env_path)
 except ImportError:
     # Manual simple .env parser fallback if python-dotenv is not installed
-    env_path = BASE_DIR / ".env"
+    env_path = PROJECT_ROOT / ".env"
     if env_path.exists():
         with open(env_path, "r", encoding="utf-8") as f:
             for line in f:
@@ -57,12 +58,10 @@ POSTGRES_DB = os.environ.get("POSTGRES_DB", "privacyshield")
 
 POSTGRES_URL = f"postgresql://{POSTGRES_USER}:{quote_plus(POSTGRES_PASSWORD)}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
 
-# LangSmith Observability & Tracing Configuration
-if os.environ.get("LANGCHAIN_API_KEY"):
-    os.environ["LANGCHAIN_TRACING_V2"] = os.environ.get("LANGCHAIN_TRACING_V2", "true").strip('"').strip("'")
-    os.environ["LANGCHAIN_API_KEY"] = os.environ.get("LANGCHAIN_API_KEY", "").strip('"').strip("'")
-    os.environ["LANGCHAIN_PROJECT"] = os.environ.get("LANGCHAIN_PROJECT", "Privacy-Shield").strip('"').strip("'")
-    os.environ["LANGCHAIN_ENDPOINT"] = os.environ.get("LANGCHAIN_ENDPOINT", "https://api.smith.langchain.com").strip('"').strip("'")
+# Configure current LangSmith variables and privacy-safe tracing defaults.
+from app.agents.observability import configure_langsmith
+
+configure_langsmith()
 
 
 

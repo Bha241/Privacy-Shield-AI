@@ -125,8 +125,9 @@ class ContextBuilder:
         cls,
         intent: str,
         query: str,
-        document_id: str,
         doc_texts: Dict[str, str],
+        document_id: Optional[str] = None,
+        document_name: Optional[str] = None,
         vector_store_manager: Optional[Any] = None,
         top_k: Optional[int] = None,
         context_strategy: Optional[str] = None
@@ -139,14 +140,27 @@ class ContextBuilder:
         """
         top_k_to_use = cls.get_top_k_for_intent(intent, top_k)
 
+        if not document_id:
+            return ContextBuildResult(
+                context_block="No document context selected.",
+                retrieved_chunks=[],
+                intent=intent,
+                top_k_used=top_k_to_use,
+                total_characters=0,
+                is_full_document=False,
+                retrieval_confidence="low",
+                source_attributions=[],
+                context_strategy_used="NO_DOCUMENT",
+            )
+
+        # All retrieval is explicitly scoped to this one document.
+        primary_document_id = document_id
+        resolved_document_name = document_name or document_id
+
         # Retrieve full text from DocumentCache or fallback doc_texts
-        full_doc_text = ""
-        if document_cache and document_cache.has_document(document_id):
-            full_doc_text = document_cache.get_full_text(document_id)
-        if not full_doc_text and document_cache:
-            full_doc_text = document_cache.get_full_text()
+        full_doc_text = document_cache.get_full_text(primary_document_id) if document_cache else ""
         if not full_doc_text and doc_texts:
-            full_doc_text = doc_texts.get(document_id, "") or (list(doc_texts.values())[-1] if doc_texts else "")
+            full_doc_text = doc_texts.get(primary_document_id, "")
 
         strategy = context_strategy or ("FULL_DOCUMENT" if intent in ["summary", "executive_summary", "analysis", "compliance", "risk"] else "SEMANTIC_RETRIEVAL")
         document_level_query = (strategy == "FULL_DOCUMENT" or intent in ["summary", "executive_summary", "analysis", "compliance", "risk"])
@@ -163,13 +177,13 @@ class ContextBuilder:
 
             return ContextBuildResult(
                 context_block=cleaned_full_text,
-                retrieved_chunks=[{"chunk_id": f"full_doc_{document_id}", "text": cleaned_full_text, "document_id": document_id}],
+                retrieved_chunks=[{"chunk_id": f"full_doc_{primary_document_id}", "text": cleaned_full_text, "document_id": primary_document_id, "document_name": resolved_document_name}],
                 intent=intent,
                 top_k_used=top_k_to_use,
                 total_characters=len(cleaned_full_text),
                 is_full_document=True,
                 retrieval_confidence="high",
-                source_attributions=["(Source: Full Document)"],
+                source_attributions=[f"(Source: {resolved_document_name})"],
                 context_strategy_used="FULL_DOCUMENT"
             )
 
@@ -178,16 +192,15 @@ class ContextBuilder:
         # Vector search for Fact / Hybrid queries
         if vector_store_manager:
             try:
-                retrieved_chunks = vector_store_manager.search_similar_chunks(
+                retrieved_chunks.extend(vector_store_manager.search_similar_chunks(
                     query_text=query,
-                    document_id=document_id,
+                    document_id=primary_document_id,
                     top_k=top_k_to_use
-                )
-                if retrieved_chunks and document_id:
-                    retrieved_chunks = [
-                        c for c in retrieved_chunks 
-                        if not c.get("document_id") or c.get("document_id") == document_id or (document_cache and document_cache.get(c.get("document_id")))
-                    ]
+                ))
+                retrieved_chunks = [
+                    c for c in retrieved_chunks
+                    if c.get("document_id") == primary_document_id
+                ]
             except Exception:
                 retrieved_chunks = []
 
@@ -199,7 +212,7 @@ class ContextBuilder:
                 if idx >= 0:
                     start = max(0, idx - 300)
                     end = min(len(full_doc_text), idx + len(txt) + 300)
-                    expanded.append({"chunk_id": chk.get("chunk_id"), "text": full_doc_text[start:end], "document_id": document_id})
+                    expanded.append({"chunk_id": chk.get("chunk_id"), "text": full_doc_text[start:end], "document_id": chk.get("document_id"), "document_name": chk.get("document_name")})
                 else:
                     expanded.append(chk)
             retrieved_chunks = expanded
@@ -226,13 +239,13 @@ class ContextBuilder:
         elif document_exists:
             # STATE B: Document uploaded/cached, but vector search returned zero chunks -> Fallback to complete cached document
             context_block = full_doc_text[:cls.MAX_CONTEXT_CHARS]
-            selected_chunks = [{"chunk_id": f"full_doc_fallback_{document_id}", "text": context_block, "document_id": document_id}]
+            selected_chunks = [{"chunk_id": f"full_doc_fallback_{primary_document_id}", "text": context_block, "document_id": primary_document_id, "document_name": resolved_document_name}]
             used_strategy = "FULL_DOCUMENT_FALLBACK"
             is_full_doc = True
             confidence = "high"
         else:
             # STATE A: No document has been ingested
-            context_block = "No document has been ingested."
+            context_block = "No selected document has been ingested."
             selected_chunks = []
             used_strategy = "NO_DOCUMENT"
             is_full_doc = False
@@ -246,7 +259,8 @@ class ContextBuilder:
                 pages.add(str(ref))
         if pages:
             sorted_pages = sorted(list(pages), key=lambda x: int(x) if x.isdigit() else x)
-            source_attributions.append(f"(Source: Page {', '.join(sorted_pages)})")
+            names = sorted({c.get("document_name", c.get("document_id", "document")) for c in selected_chunks})
+            source_attributions.append(f"(Source: {', '.join(names)} · Page {', '.join(sorted_pages)})")
         else:
             source_attributions.append("(Source: Full Document)" if is_full_doc else "(Source: Document Excerpts)")
 

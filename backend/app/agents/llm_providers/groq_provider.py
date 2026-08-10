@@ -104,11 +104,11 @@ class GroqProvider(BaseLLMProvider):
         start_t = time.time()
         try:
             import httpx
-            resp = httpx.get(
-                "https://api.groq.com/openai/v1/models",
-                headers={"Authorization": f"Bearer {self.api_key.strip()}"},
-                timeout=5.0
-            )
+            with httpx.Client(trust_env=False, timeout=5.0) as client:
+                resp = client.get(
+                    "https://api.groq.com/openai/v1/models",
+                    headers={"Authorization": f"Bearer {self.api_key.strip()}"},
+                )
             latency = int((time.time() - start_t) * 1000)
 
             if resp.status_code == 200:
@@ -188,14 +188,17 @@ class GroqProvider(BaseLLMProvider):
         # 1. Try official Groq SDK
         if HAS_GROQ_SDK:
             try:
-                client = Groq(api_key=clean_key)
-                completion = client.chat.completions.create(
-                    model=target_model,
-                    messages=messages,
-                    temperature=max(0.01, min(float(temperature), 1.0)),
-                    max_tokens=int(max_tokens),
-                    top_p=float(top_p)
-                )
+                import httpx
+
+                with httpx.Client(trust_env=False, timeout=25.0) as http_client:
+                    client = Groq(api_key=clean_key, http_client=http_client)
+                    completion = client.chat.completions.create(
+                        model=target_model,
+                        messages=messages,
+                        temperature=max(0.01, min(float(temperature), 1.0)),
+                        max_tokens=int(max_tokens),
+                        top_p=float(top_p)
+                    )
                 latency_ms = int((time.time() - start_t) * 1000)
 
                 if completion and completion.choices and completion.choices[0].message:
@@ -237,15 +240,15 @@ class GroqProvider(BaseLLMProvider):
                 "top_p": float(top_p)
             }
 
-            resp = httpx.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {clean_key}",
-                    "Content-Type": "application/json"
-                },
-                timeout=25.0
-            )
+            with httpx.Client(trust_env=False, timeout=25.0) as client:
+                resp = client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {clean_key}",
+                        "Content-Type": "application/json"
+                    },
+                )
 
             latency_ms = int((time.time() - start_t) * 1000)
 
@@ -305,7 +308,10 @@ class GroqProvider(BaseLLMProvider):
         if not HAS_GROQ_SDK:
             raise RuntimeError("Groq SDK is not installed. Please install groq to enable streaming.")
 
-        client = Groq(api_key=clean_key)
+        import httpx
+
+        http_client = httpx.Client(trust_env=False, timeout=25.0)
+        client = Groq(api_key=clean_key, http_client=http_client)
         stream = client.chat.completions.create(
             model=target_model,
             messages=messages,

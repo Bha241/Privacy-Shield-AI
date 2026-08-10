@@ -26,11 +26,20 @@ export interface PIIRedactResponse {
 
 export interface AuditLog {
   id: string;
+  event_id?: string;
+  log_id?: string;
   timestamp: string;
   event_type: string;
   user_id: string;
-  details: string;
-  ip_address: string;
+  actor_id?: string;
+  document_id?: string | null;
+  document_name?: string | null;
+  details: string | Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  origin_ip?: string | null;
+  ip_address?: string | null;
+  prev_hash?: string;
+  entry_hash?: string;
 }
 
 export interface LLMSettings {
@@ -51,6 +60,28 @@ export interface ChatMessageResponse {
   fallback_reason?: string | null;
   latency_ms?: number;
   request_id?: string;
+  document_id?: string;
+}
+
+export interface ChatDocument {
+  id: string;
+  document_id: string;
+  filename: string;
+  file_type?: string;
+  category?: string;
+  status: 'READY' | 'PENDING' | 'PROCESSING' | 'FAILED' | string;
+  risk_score?: number;
+  created_at?: string | null;
+  owner_id?: string;
+  organization_id?: string;
+  classification?: string;
+}
+
+export interface ProcessedDocument extends ChatDocument {
+  original_text: string;
+  masked_text: string;
+  entities: PIIMatch[];
+  mapping?: Record<string, string>;
 }
 
 export interface DocumentItem {
@@ -65,11 +96,50 @@ export interface DocumentItem {
   created_at: string;
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
+export interface RetentionSettings {
+  retention_days: number;
+  min_days: number;
+  max_days: number;
+  timezone: string;
+  oldest_retained_data: string | null;
+  expired_records_pending_cleanup: number;
+  next_cleanup: string;
+  last_cleanup_date?: string | null;
+  previous_retention_days?: number;
+  warning?: string | null;
+}
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000/api/v1';
+const API_BASES = Array.from(new Set([
+  API_BASE,
+  'http://127.0.0.1:8000/api/v1',
+  'http://localhost:8000/api/v1',
+]));
+
+async function fetchApi(path: string, init?: RequestInit): Promise<Response> {
+  let lastError: unknown;
+  // The guarded backend launcher may need a few seconds to restart after an
+  // unexpected process exit. Retry network-level failures only; HTTP errors
+  // are returned immediately so endpoint failures remain visible to callers.
+  const retryDelays = [0, 500, 1500, 3000];
+
+  for (const delay of retryDelays) {
+    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+    for (const base of API_BASES) {
+      try {
+        return await fetch(`${base}${path}`, init);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('Backend API is unreachable');
+}
 
 export async function redactPII(text: string, maskingStrategy = 'REPLACE'): Promise<PIIRedactResponse> {
   try {
-    const res = await fetch(`${API_BASE}/pii/redact`, {
+    const res = await fetchApi('/pii/redact', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text, masking_strategy: maskingStrategy }),
@@ -88,7 +158,7 @@ export async function redactPIIFromFile(file: File, maskingStrategy = 'REPLACE')
     formData.append('file', file);
     formData.append('masking_strategy', maskingStrategy);
 
-    const res = await fetch(`${API_BASE}/pii/redact-file`, {
+    const res = await fetchApi('/pii/redact-file', {
       method: 'POST',
       body: formData,
     });
@@ -107,10 +177,11 @@ export async function sendChatMessage(
   originalText: string,
   redactedText: string,
   entities: PIIMatch[],
-  llmSettings: LLMSettings
+  llmSettings: LLMSettings,
+  documentId: string
 ): Promise<ChatMessageResponse> {
   try {
-    const res = await fetch(`${API_BASE}/pii/chat`, {
+    const res = await fetchApi('/pii/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -118,51 +189,133 @@ export async function sendChatMessage(
         original_text: originalText,
         redacted_text: redactedText,
         entities,
+        document_id: documentId,
+        owner_id: 'usr_admin',
+        organization_id: 'org_default',
         llm_settings: llmSettings,
       }),
     });
-    if (!res.ok) throw new Error('Failed to fetch RAG chat response');
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      const detail = typeof body?.detail === 'string' ? body.detail : `HTTP ${res.status}`;
+      throw new Error(`Chat API failed (${res.status}): ${detail}`);
+    }
     return await res.json();
   } catch (err) {
-    console.warn('Backend API offline, falling back to local chat generator:', err);
-    return fallbackChatMessage(message, redactedText || originalText, entities, llmSettings.model);
+    const reason = err instanceof Error ? err.message : 'Backend API offline (Client-side Fallback)';
+    console.warn('Chat request failed; falling back to local chat generator:', err);
+    return fallbackChatMessage(message, redactedText || originalText, entities, llmSettings.model, reason);
   }
 }
 
-export async function getAuditLogs(): Promise<AuditLog[]> {
-  try {
-    const res = await fetch(`${API_BASE}/audit/logs`);
-    if (!res.ok) throw new Error('Failed to fetch audit logs');
-    return await res.json();
-  } catch (err) {
-    console.warn('Backend offline, returning mock audit logs:', err);
-    return [
-      {
-        id: 'audit-101',
-        timestamp: new Date(Date.now() - 1000 * 60 * 5).toISOString(),
-        event_type: 'PII_REDACTION',
-        user_id: 'priya.nair@acme-health.com',
-        details: 'Masked 4 PII entities (Aadhaar, PAN, Email, Phone)',
-        ip_address: '192.168.1.45',
-      },
-      {
-        id: 'audit-102',
-        timestamp: new Date(Date.now() - 1000 * 60 * 30).toISOString(),
-        event_type: 'RAG_CHAT_QUERY',
-        user_id: 'priya.nair@acme-health.com',
-        details: 'Executed demasked RAG query on patient_records.pdf',
-        ip_address: '192.168.1.45',
-      },
-      {
-        id: 'audit-103',
-        timestamp: new Date(Date.now() - 1000 * 60 * 120).toISOString(),
-        event_type: 'DOCUMENT_INDEXED',
-        user_id: 'system-agent',
-        details: 'Generated 12 redacted vector embeddings with zero raw PII tokens',
-        ip_address: '127.0.0.1',
-      },
-    ];
+export async function registerDocument(filename: string, fileType = 'application/octet-stream'): Promise<ChatDocument> {
+  const res = await fetchApi('/documents/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filename, file_type: fileType, owner_id: 'usr_admin', organization_id: 'org_default' }),
+  });
+  if (!res.ok) throw new Error(`Document registration failed (${res.status})`);
+  return await res.json();
+}
+
+export async function listDocuments(): Promise<ChatDocument[]> {
+  const res = await fetchApi('/documents/library?owner_id=usr_admin&organization_id=org_default');
+  if (!res.ok) throw new Error(`Document library failed (${res.status})`);
+  return await res.json();
+}
+
+export async function getDocumentDetail(documentId: string): Promise<ProcessedDocument> {
+  const res = await fetchApi(`/documents/${encodeURIComponent(documentId)}?owner_id=usr_admin&organization_id=org_default`);
+  if (!res.ok) throw new Error(`Document details failed (${res.status})`);
+  return await res.json();
+}
+
+export async function deleteDocument(documentId: string): Promise<{ document_id: string; document_name: string; status: string }> {
+  const res = await fetchApi(`/documents/${encodeURIComponent(documentId)}?owner_id=usr_admin&organization_id=org_default`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `Document deletion failed (${res.status})`);
   }
+  return await res.json();
+}
+
+export async function deleteAllWorkspaceData(): Promise<{ status: string; documents_deleted: number; [key: string]: unknown }> {
+  const res = await fetchApi('/documents/data?owner_id=usr_admin&organization_id=org_default', {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `Workspace data deletion failed (${res.status})`);
+  }
+  return await res.json();
+}
+
+export async function applyDocumentMasking(
+  documentId: string,
+  originalText: string,
+  entities: PIIMatch[]
+): Promise<{ document_id: string; masked_text: string; mapping: Record<string, string>; ingested: boolean }> {
+  const res = await fetchApi('/pii/mask', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      document_id: documentId,
+      original_text: originalText,
+      approved_entities: entities.map((entity) => ({
+        text: entity.text,
+        label: entity.entity_type,
+        start: entity.start,
+        end: entity.end,
+        confidence: entity.score,
+        approved: true,
+      })),
+      actor_id: 'usr_admin',
+      organization_id: 'org_default',
+      force_mask: true,
+    }),
+  });
+  if (!res.ok) throw new Error(`Document masking failed (${res.status})`);
+  return await res.json();
+}
+
+export async function getAuditLogs(): Promise<AuditLog[]> {
+  const res = await fetchApi('/audit/logs', { cache: 'no-store' });
+  if (!res.ok) throw new Error(`Failed to fetch audit logs (${res.status})`);
+  return await res.json();
+}
+
+export async function getRetentionSettings(): Promise<RetentionSettings> {
+  const res = await fetchApi('/settings/retention?organization_id=org_default', { cache: 'no-store' });
+  if (!res.ok) throw new Error(`Retention settings failed (${res.status})`);
+  return await res.json();
+}
+
+export async function updateRetentionSettings(retentionDays: number): Promise<RetentionSettings> {
+  const res = await fetchApi('/settings/retention', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ retention_days: retentionDays, owner_id: 'usr_admin', organization_id: 'org_default' }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `Retention update failed (${res.status})`);
+  }
+  return await res.json();
+}
+
+export async function purgeExpiredData(): Promise<{ documents_deleted: number; message: string; [key: string]: unknown }> {
+  const res = await fetchApi('/settings/retention/purge-expired', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ owner_id: 'usr_admin', organization_id: 'org_default' }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `Retention cleanup failed (${res.status})`);
+  }
+  return await res.json();
 }
 
 export async function uploadDocument(file: File): Promise<{ job_id: string; filename: string }> {
@@ -171,7 +324,7 @@ export async function uploadDocument(file: File): Promise<{ job_id: string; file
     formData.append('file', file);
     formData.append('masking_strategy', 'REPLACE');
 
-    const res = await fetch(`${API_BASE}/documents/upload`, {
+    const res = await fetchApi('/documents/upload', {
       method: 'POST',
       body: formData,
     });
@@ -223,7 +376,7 @@ function fallbackRedactPII(text: string): PIIRedactResponse {
   });
 
   const riskScore = Math.min(matches.length * 20, 100);
-  const riskLevel = riskScore >= 75 ? 'CRITICAL' : riskScore >= 50 ? 'HIGH' : riskScore >= 25 ? 'MEDIUM' : 'LOW';
+  const riskLevel = riskScore > 60 ? 'HIGH' : riskScore >= 30 ? 'MEDIUM' : 'LOW';
 
   return {
     original_text: text,
@@ -234,7 +387,7 @@ function fallbackRedactPII(text: string): PIIRedactResponse {
     compliance_passed: riskScore < 75,
     classification: {
       category: 'Corporate & Supply Chain Data',
-      sensitivity: 'RESTRICTED / HIGH',
+      sensitivity: riskLevel,
       confidence: 0.98,
       summary: 'Contains protected identifiers, names, tax data, and financial credentials.',
       compliance_frameworks: ['DPDP Act 2023', 'GDPR Art. 9', 'ISO 27001'],
@@ -246,7 +399,8 @@ function fallbackChatMessage(
   message: string,
   documentContext: string,
   entities: PIIMatch[],
-  model: string
+  model: string,
+  fallbackReason = 'Backend API offline (Client-side Fallback)'
 ): ChatMessageResponse {
   const queryLower = message.toLowerCase();
   const context = (typeof documentContext === 'string' ? documentContext : '').trim();
@@ -322,7 +476,7 @@ ${context.substring(0, 2500)}
     processing_time_ms: 180,
     provider_used: 'Local Qwen',
     routing_strategy: 'Fallback',
-    fallback_reason: 'Backend API offline (Client-side Fallback)',
+    fallback_reason: fallbackReason,
     latency_ms: 180,
     request_id: `req-fallback-${Math.random().toString(36).substring(2, 9)}`,
   };
@@ -364,7 +518,7 @@ export async function extractTextFromFile(file: File): Promise<string> {
       formData.append('file', file);
       formData.append('masking_strategy', 'REPLACE');
 
-      const res = await fetch(`${API_BASE}/pii/redact-file`, {
+      const res = await fetchApi('/pii/redact-file', {
         method: 'POST',
         body: formData,
       });
@@ -575,14 +729,21 @@ export function applyVerifiedHITLMasking(
 ): { maskedText: string; mapping: Record<string, string>; formattedTokenizedText: string } {
   let maskedText = originalText;
   const mapping: Record<string, string> = {};
+  const counters: Record<string, number> = {};
 
   // Sort entities by start index descending to prevent index shifts
   const sorted = [...verifiedEntities].sort((a, b) => b.start - a.start);
 
-  sorted.forEach((ent, idx) => {
-    const placeholder = `<${ent.entity_type}_${idx + 1}>`;
+  sorted.forEach((ent) => {
+    const entityType = ent.entity_type.replace(/[^A-Za-z0-9]/g, '_').toUpperCase() || 'PII';
+    counters[entityType] = (counters[entityType] || 0) + 1;
+    const placeholder = `<${entityType}_${counters[entityType]}>`;
     mapping[placeholder] = ent.text;
-    maskedText = maskedText.replace(ent.text, placeholder);
+    if (ent.start >= 0 && ent.end > ent.start && ent.end <= maskedText.length) {
+      maskedText = `${maskedText.slice(0, ent.start)}${placeholder}${maskedText.slice(ent.end)}`;
+    } else {
+      maskedText = maskedText.replace(ent.text, placeholder);
+    }
   });
 
   return {
@@ -591,5 +752,3 @@ export function applyVerifiedHITLMasking(
     formattedTokenizedText: maskedText,
   };
 }
-
-

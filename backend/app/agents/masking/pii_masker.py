@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import dataclass
 from typing import List, Dict, Tuple
 from pii_detector.schemas.entities import Entity
@@ -65,13 +66,14 @@ class PIIMasker:
         entity_token_pairs: List[Tuple[Entity, str]] = []
 
         for e in resolved_entities:
-            key = (e.label, e.text)
+            label = re.sub(r"[^A-Za-z0-9]", "_", str(e.label or "PII")).strip("_").upper() or "PII"
+            key = (label, e.text)
             if reuse_tokens and key in text_to_token:
                 token = text_to_token[key]
             else:
                 label_counters[e.label] = label_counters.get(e.label, 0) + 1
                 token_id = label_counters[e.label]
-                token = self.token_format.format(label=e.label, id=token_id)
+                token = self.token_format.format(label=label, id=token_id)
                 if reuse_tokens:
                     text_to_token[key] = token
 
@@ -80,7 +82,7 @@ class PIIMasker:
             detailed_mapping.append({
                 "mask_token": token,
                 "original_text": e.text,
-                "label": e.label,
+                "label": label,
                 "start": e.start,
                 "end": e.end,
                 "confidence": getattr(e, "confidence", 1.0),

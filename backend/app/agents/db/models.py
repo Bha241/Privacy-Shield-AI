@@ -5,7 +5,7 @@ from typing import Optional, List, Dict, Any
 from enum import Enum
 
 from sqlalchemy import (
-    Column, String, Float, Integer, Text, Boolean, DateTime, ForeignKey, Index
+    Column, String, Float, Integer, Text, Boolean, DateTime, Date, ForeignKey, Index, UniqueConstraint, CheckConstraint
 )
 from sqlalchemy.orm import declarative_base, relationship
 from pydantic import BaseModel, Field
@@ -51,9 +51,15 @@ class DocumentModel(Base):
     status = Column(String(32), nullable=False, default=DocumentStatusEnum.PENDING.value)
     upload_timestamp = Column(DateTime, nullable=False, default=datetime.utcnow)
     owner_id = Column(String(64), ForeignKey("users_roles.user_id"), nullable=True, default="usr_admin")
+    organization_id = Column(String(64), nullable=False, default="org_default")
+    original_text = Column(Text, nullable=True)
+    masked_text = Column(Text, nullable=True)
+    token_mapping_json = Column(Text, nullable=True)
+    detected_entities_json = Column(Text, nullable=True)
 
     # Relationships
     pii_entities = relationship("PIIEntityModel", back_populates="document", cascade="all, delete-orphan")
+    pii_mappings = relationship("PIIMappingModel", back_populates="document", cascade="all, delete-orphan")
     sanitized_chunks = relationship("SanitizedChunkModel", back_populates="document", cascade="all, delete-orphan")
     audit_logs = relationship("AuditLogEntryModel", back_populates="document", cascade="all, delete-orphan")
     owner = relationship("UserRoleModel", back_populates="documents")
@@ -66,7 +72,12 @@ class DocumentModel(Base):
             "risk_score": self.risk_score,
             "status": self.status,
             "upload_timestamp": self.upload_timestamp.isoformat() if self.upload_timestamp else None,
-            "owner_id": self.owner_id
+            "owner_id": self.owner_id,
+            "organization_id": self.organization_id,
+            "original_text": self.original_text,
+            "masked_text": self.masked_text,
+            "token_mapping_json": self.token_mapping_json,
+            "detected_entities_json": self.detected_entities_json
         }
 
 
@@ -102,6 +113,37 @@ class PIIEntityModel(Base):
         }
 
 
+class PIIMappingModel(Base):
+    """Document-scoped reversible token mapping metadata."""
+    __tablename__ = "pii_mappings"
+    __table_args__ = (UniqueConstraint("document_id", "token", name="uq_pii_mapping_document_token"),)
+
+    mapping_id = Column(String(64), primary_key=True, default=lambda: f"map_{uuid.uuid4().hex[:12]}")
+    document_id = Column(String(64), ForeignKey("documents.document_id"), nullable=False)
+    token = Column(String(128), nullable=False)
+    entity_type = Column(String(64), nullable=False)
+    original_value = Column(Text, nullable=False)
+    occurrence_index = Column(Integer, nullable=False, default=1)
+    start_offset = Column(Integer, nullable=True)
+    end_offset = Column(Integer, nullable=True)
+    approved = Column(Boolean, nullable=False, default=True)
+
+    document = relationship("DocumentModel", back_populates="pii_mappings")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "mapping_id": self.mapping_id,
+            "document_id": self.document_id,
+            "token": self.token,
+            "entity_type": self.entity_type,
+            "original_value": self.original_value,
+            "occurrence_index": self.occurrence_index,
+            "start_offset": self.start_offset,
+            "end_offset": self.end_offset,
+            "approved": self.approved,
+        }
+
+
 # ==========================================
 # 3. Sanitized Chunk Entity (Vector DB Store)
 # ==========================================
@@ -117,6 +159,7 @@ class SanitizedChunkModel(Base):
     text = Column(Text, nullable=False)
     embedding_vector = Column(Text, nullable=True)  # JSON-encoded float array / vector
     page_ref = Column(String(32), nullable=True, default="1")
+    chunk_index = Column(Integer, nullable=False, default=1)
 
     document = relationship("DocumentModel", back_populates="sanitized_chunks")
 
@@ -132,7 +175,8 @@ class SanitizedChunkModel(Base):
             "document_id": self.document_id,
             "text": self.text,
             "embedding_vector_dim": len(self.get_vector()),
-            "page_ref": self.page_ref
+            "page_ref": self.page_ref,
+            "chunk_index": self.chunk_index
         }
 
 
@@ -158,15 +202,26 @@ class AuditLogEntryModel(Base):
     document = relationship("DocumentModel", back_populates="audit_logs")
 
     def to_dict(self) -> Dict[str, Any]:
+        try:
+            details = json.loads(self.details_json) if self.details_json else {}
+        except (TypeError, ValueError):
+            details = {"raw_details": self.details_json or ""}
         return {
             "log_id": self.log_id,
+            "event_id": self.log_id,
+            "id": self.log_id,
             "actor_id": self.actor_id,
+            "user_id": self.actor_id,
             "action_type": self.action_type,
+            "event_type": self.action_type,
             "document_id": self.document_id,
+            "document_name": self.document.filename if self.document else details.get("document_name"),
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
             "prev_hash": self.prev_hash,
             "entry_hash": self.entry_hash,
-            "details": json.loads(self.details_json) if self.details_json else {}
+            "origin_ip": details.get("origin_ip"),
+            "details": details,
+            "metadata": details,
         }
 
 
@@ -234,6 +289,23 @@ class ComplianceRuleSetModel(Base):
             "version": self.version,
             "active_flag": self.active_flag
         }
+
+
+class RetentionPolicyModel(Base):
+    """Workspace-scoped calendar-date retention policy and daily-run state."""
+    __tablename__ = "retention_policies"
+    __table_args__ = (
+        UniqueConstraint("organization_id", name="uq_retention_policy_organization"),
+        CheckConstraint("retention_days >= 7 AND retention_days <= 21", name="ck_retention_days_range"),
+    )
+
+    policy_id = Column(String(64), primary_key=True, default=lambda: f"ret_{uuid.uuid4().hex[:12]}")
+    organization_id = Column(String(64), nullable=False, default="org_default")
+    retention_days = Column(Integer, nullable=False, default=7)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_cleanup_date = Column(Date, nullable=True)
+    last_cleanup_at = Column(DateTime, nullable=True)
 
 
 # ==========================================

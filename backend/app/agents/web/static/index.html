@@ -120,7 +120,7 @@
             <button class="w-full py-2 bg-primary/10 border border-primary/30 text-primary rounded-md text-xs font-mono font-semibold flex items-center justify-center gap-1.5 hover:bg-primary/20 transition-all active:scale-95" onclick="document.getElementById('file-input').click()">
                 <span class="material-symbols-outlined text-[18px]">add</span> Analyze Document
             </button>
-            <input type="file" id="file-input" multiple style="display: none;" accept=".pdf,.txt,.doc,.docx,.png,.jpg,.jpeg,.bmp" onchange="handleFileSelect(event)">
+            <input type="file" id="file-input" style="display: none;" accept=".pdf,.txt,.doc,.docx,.png,.jpg,.jpeg,.bmp" onchange="handleFileSelect(event)">
             
             <div class="flex justify-between items-center pt-2 text-on-surface-variant text-[11px] font-mono">
                 <button onclick="clearUploadedFiles()" class="hover:text-error transition-colors flex items-center gap-1">

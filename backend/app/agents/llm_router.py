@@ -17,6 +17,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple, Generator
 
+from app.agents.observability import traceable
+
 from app.agents.llm_providers import (
     BaseLLMProvider,
     LLMProviderResponse,
@@ -198,6 +200,11 @@ class LLMRouter:
             "providers": providers_status
         }
 
+    @traceable(
+        name="privacyshield.llm.route",
+        run_type="llm",
+        tags=["privacyshield", "llm-router", "pii-safe"],
+    )
     def generate(
         self,
         messages: List[Dict[str, str]],

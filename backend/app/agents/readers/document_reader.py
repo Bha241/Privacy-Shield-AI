@@ -1,11 +1,35 @@
 from pathlib import Path
 import io
+import json
 import logging
+import os
 from typing import Optional, List
 import fitz  # PyMuPDF
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+# Keep PaddleX's automatic model downloads inside the project-owned writable
+# cache instead of the machine-level home directory.
+PADDLEX_CACHE_DIR = Path(__file__).resolve().parents[4] / ".local" / "paddlex"
+PADDLEX_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(PADDLEX_CACHE_DIR))
+PADDLE_CACHE_DIR = PADDLEX_CACHE_DIR.parent / "paddle"
+PADDLE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+PADDLE_RUNTIME_HOME = PADDLEX_CACHE_DIR.parent / "paddle-home"
+PADDLE_RUNTIME_HOME.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("PADDLE_HOME", str(PADDLE_CACHE_DIR))
+os.environ.setdefault("XDG_CACHE_HOME", str(PADDLEX_CACHE_DIR.parent))
+os.environ.setdefault("PADDLE_EXTENSION_DIR", str(PADDLE_CACHE_DIR / "extensions"))
+
+# PaddleOCR is the primary OCR engine. It is loaded lazily so the backend can
+# still start when its model files are unavailable; EasyOCR remains the first
+# runtime fallback in that case.
+try:
+    import importlib.util
+    PADDLEOCR_AVAILABLE = importlib.util.find_spec("paddleocr") is not None
+except Exception:
+    PADDLEOCR_AVAILABLE = False
 
 # Check OCR engines
 try:
@@ -28,7 +52,37 @@ class DocumentReader:
         self.enable_ocr = enable_ocr
         self.lang_list = lang_list or ["en"]
         self._use_gpu = use_gpu
+        self._paddle_reader = None
         self._easyocr_reader = None
+
+    @property
+    def paddle_reader(self):
+        if self._paddle_reader is None and self.enable_ocr and PADDLEOCR_AVAILABLE:
+            try:
+                # PaddlePaddle 3.3 still resolves one legacy dataset cache
+                # through USERPROFILE on Windows. Redirect it only while the
+                # package initializes; the rest of the backend keeps its
+                # normal process environment.
+                previous_userprofile = os.environ.get("USERPROFILE")
+                os.environ["USERPROFILE"] = str(PADDLE_RUNTIME_HOME)
+                try:
+                    from paddleocr import PaddleOCR
+                    self._paddle_reader = PaddleOCR(
+                        lang=self.lang_list[0],
+                        use_doc_orientation_classify=False,
+                        use_doc_unwarping=False,
+                        use_textline_orientation=False,
+                        enable_mkldnn=False,
+                    )
+                finally:
+                    if previous_userprofile is None:
+                        os.environ.pop("USERPROFILE", None)
+                    else:
+                        os.environ["USERPROFILE"] = previous_userprofile
+                logger.info("Initialized PaddleOCR as the primary OCR engine")
+            except Exception as e:
+                logger.warning(f"PaddleOCR initialization warning; using EasyOCR fallback: {e}")
+        return self._paddle_reader
 
     @property
     def easyocr_reader(self):
@@ -48,7 +102,34 @@ class DocumentReader:
         if not self.enable_ocr:
             return ""
 
-        # 1. EasyOCR
+        # 1. PaddleOCR (primary)
+        if self.paddle_reader:
+            try:
+                import numpy as np
+                image = np.asarray(Image.open(io.BytesIO(image_bytes)).convert("RGB"))
+                results = self.paddle_reader.predict(
+                    image,
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False,
+                    use_textline_orientation=False,
+                )
+                texts = []
+                for result in results:
+                    payload = result
+                    if hasattr(result, "json"):
+                        payload = result.json
+                        if callable(payload):
+                            payload = payload()
+                    if isinstance(payload, str):
+                        payload = json.loads(payload)
+                    if isinstance(payload, dict):
+                        texts.extend(str(text).strip() for text in payload.get("rec_texts", []) if str(text).strip())
+                if texts:
+                    return "\n".join(texts)
+            except Exception as e:
+                logger.warning(f"PaddleOCR error; using EasyOCR fallback: {e}")
+
+        # 2. EasyOCR fallback
         if self.easyocr_reader:
             try:
                 results = self.easyocr_reader.readtext(image_bytes, detail=0)
@@ -57,7 +138,8 @@ class DocumentReader:
             except Exception as e:
                 logger.warning(f"EasyOCR error: {e}")
 
-        # 2. Pytesseract Fallback
+        # 3. Optional Pytesseract fallback for installations without either
+        # neural OCR engine or when both engines fail on a specific image.
         if PYTESSERACT_AVAILABLE:
             try:
                 img = Image.open(io.BytesIO(image_bytes))

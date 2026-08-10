@@ -3,11 +3,13 @@ import time
 import re
 import hashlib
 import logging
+import json
 import uuid
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
+from app.agents.observability import observability_status, traceable
 
 from app.schemas.pii import (
     PIIRedactRequest,
@@ -118,6 +120,7 @@ class MaskRequest(BaseModel):
     original_text: str
     approved_entities: List[EntityCandidate]
     actor_id: str = "usr_system"
+    organization_id: str = "org_default"
     force_mask: bool = False
 
 
@@ -150,19 +153,30 @@ async def redact_pii(request: PIIRedactRequest):
     redacted_text = text
 
     # ---------- 1. Detect ----------
-    if RAG_AGENT_LOADED and rag_agent:
+    # Use the agentic detection pipeline as the source of truth. The RAG
+    # orchestrator owns retrieval/generation and does not expose a detector in
+    # every deployment, so detection must not depend on that optional object.
+    detector = getattr(detection_agent, "detector", None)
+    if detector is None and RAG_AGENT_LOADED and rag_agent:
+        detector = getattr(rag_agent, "detector", None)
+
+    if detector is not None:
         try:
-            detection = rag_agent.detector.detect(text)
+            detection = detector.detect(text)
             for ent in detection.all_entities:
                 matches.append(EntityMatch(
                     entity_type=getattr(ent, "label", "UNKNOWN"),
                     text=getattr(ent, "text", ""),
                     start=getattr(ent, "start", 0),
                     end=getattr(ent, "end", 0),
-                    score=getattr(ent, "score", 0.95)
+                    score=getattr(ent, "score", getattr(ent, "confidence", 0.95))
                 ))
-            masked_result = rag_agent.masker.mask(text, detection.all_entities)
-            redacted_text = masked_result.masked_text
+            masker = getattr(rag_agent, "masker", None) if rag_agent else None
+            if masker is not None:
+                masked_result = masker.mask(text, detection.all_entities)
+                redacted_text = masked_result.masked_text
+            else:
+                redacted_text = apply_masking(text, matches)
         except Exception as e:
             logger.warning(f"Advanced detector failed: {e}")
 
@@ -224,12 +238,14 @@ async def redact_pii(request: PIIRedactRequest):
         requires_hitl = risk_res.get("route_to_hitl", False)
     else:
         risk_score = min(len(matches) * 22, 100)
-        risk_level = "HIGH" if risk_score >= 50 else "MEDIUM" if risk_score >= 25 else "LOW"
+        risk_level = "HIGH" if risk_score > 60 else "MEDIUM" if risk_score >= 30 else "LOW"
         requires_hitl = risk_level in ["HIGH", "CRITICAL"] or category_name in ["Medical", "Financial"]
 
     # Force HITL for sensitive cases
     if category_name in ["Medical", "Financial"] or risk_level in ["HIGH", "CRITICAL"]:
         requires_hitl = True
+
+    classification.sensitivity = risk_level
 
     # ---------- 4. Audit ----------
     if audit_agent:
@@ -246,8 +262,8 @@ async def redact_pii(request: PIIRedactRequest):
                 },
                 document_id=getattr(request, "document_id", None)
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Detection audit event failed: %s", exc)
 
     # Note: We do NOT auto-ingest into RAG here if HITL is required.
     # Ingestion happens only after /mask with approved entities.
@@ -319,8 +335,25 @@ async def redact_pii_from_file(
 
 @router.post("/mask", response_model=MaskResponse)
 async def apply_hitl_mask(request: MaskRequest):
-    if not request.approved_entities:
-        raise HTTPException(400, "No entities provided")
+    # Ensure the canonical document row exists before sanitized chunks are
+    # indexed. A document ID is never replaced by the latest upload.
+    from app.agents.db.database import db_manager
+    from pii_detector.db.models import DocumentModel, DocumentStatusEnum, PIIMappingModel
+    with db_manager.get_session() as session:
+        document = session.get(DocumentModel, request.document_id)
+        if not document:
+            document = DocumentModel(
+                document_id=request.document_id,
+                filename=request.document_id,
+                category="General",
+                status=DocumentStatusEnum.PENDING.value,
+                owner_id="usr_admin",
+                organization_id=request.organization_id,
+            )
+            session.add(document)
+        document.status = DocumentStatusEnum.PENDING.value
+        document_name = document.filename
+        session.commit()
 
     approved = [e.dict() for e in request.approved_entities]
     approved_count = sum(1 for e in approved if e.get("approved", True))
@@ -363,8 +396,8 @@ async def apply_hitl_mask(request: MaskRequest):
                 total_entities_count=len(approved)
             )
             dpdp_ok = compliance.is_compliant
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("DPDP compliance evaluation failed for %s: %s", request.document_id, exc)
 
     # Ingest into RAG (only masked content)
     ingested = False
@@ -381,6 +414,13 @@ async def apply_hitl_mask(request: MaskRequest):
                 document_id=request.document_id
             )
             ingested = True
+            with db_manager.get_session() as session:
+                document = session.get(DocumentModel, request.document_id)
+                if document:
+                    document.status = DocumentStatusEnum.SANITIZED.value
+                    document.risk_score = risk_score
+                    document.category = category
+                    session.commit()
         except Exception as e:
             logger.warning(f"RAG ingest failed: {e}")
 
@@ -392,6 +432,7 @@ async def apply_hitl_mask(request: MaskRequest):
                 action_type="MASKING",
                 details={
                     "document_id": request.document_id,
+                    "document_name": document_name,
                     "approved_count": approved_count,
                     "risk_score": risk_score,
                     "ingested": ingested,
@@ -401,8 +442,41 @@ async def apply_hitl_mask(request: MaskRequest):
                 document_id=request.document_id,
                 user_approved=True
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Masking audit event failed for %s: %s", request.document_id, exc)
+
+    if ingested and rag_agent:
+        # Return the canonical document-scoped representation, not the
+        # pre-ingestion placeholder map that could collide with another file.
+        masked_text = rag_agent.doc_texts.get(request.document_id, masked_text)
+        mapping = rag_agent.doc_mappings.get(request.document_id, mapping)
+
+    # Persist the same processed representation used by RAG so every UI entry
+    # point can read one document record instead of re-running masking.
+    with db_manager.get_session() as session:
+        document = session.get(DocumentModel, request.document_id)
+        if document:
+            document.original_text = request.original_text
+            document.masked_text = masked_text
+            document.token_mapping_json = json.dumps(mapping)
+            document.detected_entities_json = json.dumps(approved)
+            document.status = DocumentStatusEnum.SANITIZED.value if ingested else DocumentStatusEnum.FAILED.value
+            document.risk_score = risk_score
+            document.category = category
+            session.query(PIIMappingModel).filter(PIIMappingModel.document_id == request.document_id).delete(synchronize_session=False)
+            for occurrence_index, (token, original_value) in enumerate(mapping.items(), start=1):
+                entity = next((item for item in approved if item.get("text") == original_value), {})
+                session.add(PIIMappingModel(
+                    document_id=request.document_id,
+                    token=token,
+                    entity_type=str(entity.get("label", "PII")).upper(),
+                    original_value=str(original_value),
+                    occurrence_index=occurrence_index,
+                    start_offset=entity.get("start"),
+                    end_offset=entity.get("end"),
+                    approved=bool(entity.get("approved", True)),
+                ))
+            session.commit()
 
     return MaskResponse(
         status="success",
@@ -424,39 +498,40 @@ async def apply_hitl_mask(request: MaskRequest):
 # ============================================================
 
 @router.post("/chat", response_model=ChatMessageResponse)
+@traceable(
+    name="privacyshield.api.chat",
+    run_type="chain",
+    tags=["privacyshield", "api", "pii-safe"],
+)
 async def chat_rag(request: ChatMessageRequest):
     start_t = time.time()
-    user_msg = (request.message or "").strip()
+    user_msg = (request.query or request.message or "").strip()
     if not user_msg:
         raise HTTPException(400, "Message cannot be empty")
 
     llm_settings = request.llm_settings or LLMSettings()
-    document_id = request.document_id or request.file_name or getattr(request, "document_id", None) or "doc_default"
+    selected_document_id = request.document_id
+    if not selected_document_id:
+        raise HTTPException(400, "No document context selected. Select at least one ready document before chatting.")
+
+    from app.agents.db.database import db_manager
+    from pii_detector.db.models import DocumentModel, DocumentStatusEnum
+    with db_manager.get_session() as session:
+        document = session.get(DocumentModel, selected_document_id)
+    if not document:
+        raise HTTPException(404, f"Document context not found: {selected_document_id}")
+    if document.owner_id != request.owner_id or document.organization_id != request.organization_id:
+        raise HTTPException(403, "One or more selected documents are outside the authorized workspace")
+    if document.status != DocumentStatusEnum.SANITIZED.value:
+        raise HTTPException(409, f"Document context is not ready: {selected_document_id}")
 
     if not RAG_AGENT_LOADED or not rag_agent:
         raise HTTPException(503, "PrivacyRAGAgent is not available")
 
-    # Auto-ingest text if document is not yet in rag_agent cache but text is provided in chat request
-    text_to_ingest = (request.redacted_text or request.original_text or "").strip()
-    if rag_agent and text_to_ingest:
-        target_id = rag_agent.resolve_document_id(document_id)
-        if target_id == "doc_default" or not rag_agent.document_cache.has_document(target_id):
-            active_id = document_id if document_id != "doc_default" else f"doc_chat_{int(time.time())}"
-            class TempMasked:
-                def __init__(self, text):
-                    self.masked_text = text
-                    self.mapping = {}
-            rag_agent.ingest_masked_result(
-                masked_result=TempMasked(text_to_ingest),
-                file_name=request.file_name or active_id,
-                document_id=active_id
-            )
-            document_id = active_id
-
     try:
         result = rag_agent.answer_query(
             user_query=user_msg,
-            document_id=document_id,
+            document_id=selected_document_id,
             temperature=llm_settings.temperature if llm_settings.temperature is not None else 0.2,
             max_tokens=llm_settings.max_tokens or 512,
             top_p=getattr(llm_settings, "top_p", 0.95),
@@ -473,12 +548,16 @@ async def chat_rag(request: ChatMessageRequest):
                     agent_name="PrivacyRAGAgent",
                     action_type="QNA_QUERY",
                     details={
-                        "document_id": document_id,
-                        "question_preview": user_msg[:100],
+                        "document_id": selected_document_id,
+                        "document_name": document.filename,
+                        "retrieved_document_id": result.get("document_id", selected_document_id),
+                        "retrieved_chunk_count": len(result.get("sources_retrieved", [])),
+                        "masked_query": True,
+                        "demasking_status": "completed",
                         "model": result.get("model_used"),
                         "processing_ms": proc_time
                     },
-                    document_id=document_id
+                    document_id=selected_document_id
                 )
             except Exception:
                 pass
@@ -493,12 +572,19 @@ async def chat_rag(request: ChatMessageRequest):
             routing_strategy=result.get("routing_strategy", "Cloud"),
             fallback_reason=result.get("fallback_reason"),
             latency_ms=result.get("latency_ms", proc_time),
-            request_id=result.get("request_id")
+            request_id=result.get("request_id"),
+            document_id=result.get("document_id", selected_document_id)
         )
 
     except Exception as e:
         logger.exception("Chat failed")
         raise HTTPException(500, f"Chat failed: {str(e)}")
+
+
+@router.get("/observability-health")
+async def get_observability_health():
+    """Return LangSmith configuration state without exposing credentials."""
+    return observability_status()
 
 
 @router.get("/llm-health")

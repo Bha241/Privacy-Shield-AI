@@ -120,14 +120,9 @@ function updateDocViewerContent() {
 
 // --- FILE SELECTION & PII DETECTION ---
 async function handleFileSelect(event) {
-    const files = Array.from(event.target.files);
+    const files = Array.from(event.target.files).slice(0, 1);
     if (!files || files.length === 0) return;
-
-    if (files.length === 1) {
-        uploadAndDetectFile(files[0]);
-    } else {
-        uploadAndDetectMultipleFiles(files);
-    }
+    uploadAndDetectFile(files[0]);
 }
 
 async function uploadAndDetectFile(file) {
@@ -162,53 +157,6 @@ async function uploadAndDetectFile(file) {
         addFilesToSessionList([file]);
 
         if (bannerText) bannerText.innerHTML = `Active: <strong>${escapeHtml(currentFileName)}</strong> (${data.total_detected} PII detected)`;
-
-        renderUploadedFilesList(sessionFileList, selectedDomain, candidateEntities);
-        renderHitlTable(candidateEntities);
-        
-        const hitlPanel = document.getElementById('hitl-panel');
-        if (hitlPanel) {
-            hitlPanel.style.display = 'block';
-            hitlPanel.scrollIntoView({ behavior: 'smooth' });
-        }
-
-    } catch (err) {
-        alert(`Network Error: ${err.message}`);
-    }
-}
-
-async function uploadAndDetectMultipleFiles(files) {
-    const bannerText = document.getElementById('file-status-text');
-    const domainSelect = document.getElementById('domain-select');
-    const selectedDomain = domainSelect ? domainSelect.value : 'general';
-
-    if (bannerText) bannerText.innerHTML = `Scanning <strong>${files.length} documents</strong> (${selectedDomain.toUpperCase()})...`;
-
-    const formData = new FormData();
-    files.forEach(file => formData.append('files', file));
-    formData.append('domain', selectedDomain);
-
-    try {
-        const response = await fetch('/api/detect_batch', {
-            method: 'POST',
-            body: formData
-        });
-
-        const data = await response.json();
-
-        if (!response.ok) {
-            alert(`Detection Error: ${data.detail || 'Failed to analyze documents'}`);
-            if (bannerText) bannerText.innerHTML = `No document uploaded yet. Click <strong>"Analyze Document"</strong>.`;
-            return;
-        }
-
-        currentFileName = data.file_name;
-        currentRawText = data.raw_text;
-        candidateEntities = data.candidate_entities;
-
-        addFilesToSessionList(files);
-
-        if (bannerText) bannerText.innerHTML = `Workspace: <strong>${sessionFileList.length} file(s)</strong> (${data.total_detected} total PII detected)`;
 
         renderUploadedFilesList(sessionFileList, selectedDomain, candidateEntities);
         renderHitlTable(candidateEntities);

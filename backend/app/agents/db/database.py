@@ -19,7 +19,10 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 from pii_detector.config import POSTGRES_URL
 
-DEFAULT_POSTGRES_URL = os.getenv("DATABASE_URL", POSTGRES_URL)
+# The core API uses asyncpg, while this legacy agent subsystem uses sync SQLAlchemy.
+# Always use the normalized synchronous URL here so both subsystems share the same database.
+DEFAULT_POSTGRES_URL = POSTGRES_URL
+SQLITE_FALLBACK_URL = f"sqlite:///{(Path(__file__).resolve().parents[3] / 'privacyshield.db').as_posix()}"
 
 
 class DatabaseManager:
@@ -38,11 +41,11 @@ class DatabaseManager:
             self.engine = create_engine(target_pg_url, pool_pre_ping=True, connect_args={"connect_timeout": 5})
             with self.engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
-            logger.info(f"Successfully connected to PostgreSQL database at {target_pg_url}")
+            logger.info("Successfully connected to the primary PostgreSQL database")
         except Exception as e:
-            logger.error(f"PostgreSQL connection failed at {target_pg_url}: {e}")
-            # Initialize engine for lazy/re-connection attempts without crashing module load
-            self.engine = create_engine(target_pg_url, pool_pre_ping=True)
+            logger.error(f"PostgreSQL connection failed; using SQLite fallback: {e}")
+            self.engine = create_engine(SQLITE_FALLBACK_URL, pool_pre_ping=True)
+            self.db_type = "SQLite fallback"
 
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
 
@@ -51,10 +54,64 @@ class DatabaseManager:
         """Create all tables and seed initial RBAC & Compliance rule sets if not populated."""
         try:
             Base.metadata.create_all(bind=self.engine)
+            self._ensure_document_columns()
+            self._ensure_retention_columns()
             logger.info(f"Database schema initialized using {self.db_type}")
             self._seed_initial_data()
+            logger.info("Database seed data initialized")
         except Exception as e:
-            logger.warning(f"Database schema creation notice (Operating with fallback DB/In-memory): {e}")
+            if self.db_type == "PostgreSQL":
+                logger.warning(f"PostgreSQL schema initialization failed; using SQLite fallback: {e}")
+                self.engine.dispose()
+                self.engine = create_engine(SQLITE_FALLBACK_URL, pool_pre_ping=True)
+                self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
+                self.db_type = "SQLite fallback"
+                Base.metadata.create_all(bind=self.engine)
+                self._ensure_document_columns()
+                self._ensure_retention_columns()
+                self._seed_initial_data()
+            else:
+                logger.warning(f"Database schema creation failed: {e}")
+
+    def _ensure_document_columns(self):
+        """Add shared processed-document fields for existing installations."""
+        with self.engine.begin() as conn:
+            if self.db_type == "PostgreSQL":
+                conn.execute(text(
+                    "ALTER TABLE documents ADD COLUMN IF NOT EXISTS organization_id VARCHAR(64) NOT NULL DEFAULT 'org_default'"
+                ))
+                conn.execute(text("ALTER TABLE documents ADD COLUMN IF NOT EXISTS original_text TEXT"))
+                conn.execute(text("ALTER TABLE documents ADD COLUMN IF NOT EXISTS masked_text TEXT"))
+                conn.execute(text("ALTER TABLE documents ADD COLUMN IF NOT EXISTS token_mapping_json TEXT"))
+                conn.execute(text("ALTER TABLE documents ADD COLUMN IF NOT EXISTS detected_entities_json TEXT"))
+                conn.execute(text("ALTER TABLE sanitized_chunks ADD COLUMN IF NOT EXISTS chunk_index INTEGER NOT NULL DEFAULT 1"))
+            else:
+                columns = conn.execute(text("PRAGMA table_info(documents)")).fetchall()
+                if not any(row[1] == "organization_id" for row in columns):
+                    conn.execute(text(
+                        "ALTER TABLE documents ADD COLUMN organization_id VARCHAR(64) NOT NULL DEFAULT 'org_default'"
+                    ))
+                existing = {row[1] for row in columns}
+                for name in ("original_text", "masked_text", "token_mapping_json", "detected_entities_json"):
+                    if name not in existing:
+                        conn.execute(text(f"ALTER TABLE documents ADD COLUMN {name} TEXT"))
+                chunk_columns = conn.execute(text("PRAGMA table_info(sanitized_chunks)")).fetchall()
+                if not any(row[1] == "chunk_index" for row in chunk_columns):
+                    conn.execute(text("ALTER TABLE sanitized_chunks ADD COLUMN chunk_index INTEGER NOT NULL DEFAULT 1"))
+
+    def _ensure_retention_columns(self):
+        """Add retention run-state columns without recreating existing tables."""
+        with self.engine.begin() as conn:
+            if self.db_type == "PostgreSQL":
+                conn.execute(text("ALTER TABLE retention_policies ADD COLUMN IF NOT EXISTS last_cleanup_date DATE"))
+                conn.execute(text("ALTER TABLE retention_policies ADD COLUMN IF NOT EXISTS last_cleanup_at TIMESTAMP"))
+            else:
+                columns = conn.execute(text("PRAGMA table_info(retention_policies)" )).fetchall()
+                existing = {row[1] for row in columns}
+                if "last_cleanup_date" not in existing:
+                    conn.execute(text("ALTER TABLE retention_policies ADD COLUMN last_cleanup_date DATE"))
+                if "last_cleanup_at" not in existing:
+                    conn.execute(text("ALTER TABLE retention_policies ADD COLUMN last_cleanup_at DATETIME"))
 
     def get_session(self) -> Session:
 

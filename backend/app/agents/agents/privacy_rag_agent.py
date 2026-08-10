@@ -15,8 +15,11 @@ Integrates:
 import os
 import re
 import time
+import uuid
 import logging
 from typing import Optional, List, Dict, Any, Tuple, Union
+
+from app.agents.observability import traceable
 
 try:
     from groq import Groq
@@ -56,6 +59,50 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
+def _bounded_prompt_context(context: str) -> str:
+    """Keep cloud prompt input bounded without discarding both document edges."""
+    try:
+        max_chars = max(8_000, int(os.getenv("PRIVACYSHIELD_MAX_PROMPT_CONTEXT_CHARS", "24000")))
+    except ValueError:
+        max_chars = 24_000
+    if len(context) <= max_chars:
+        return context
+
+    head_chars = max_chars // 2
+    tail_chars = max_chars - head_chars
+    return (
+        context[:head_chars]
+        + "\n\n[Additional middle document content omitted to stay within the model input limit.]\n\n"
+        + context[-tail_chars:]
+    )
+
+
+def _bounded_history(history: Optional[List[Dict[str, str]]]) -> Optional[List[Dict[str, str]]]:
+    """Limit prior chat text so it cannot push a valid document prompt over budget."""
+    if not history:
+        return history
+    try:
+        max_chars = max(2_000, int(os.getenv("PRIVACYSHIELD_MAX_PROMPT_HISTORY_CHARS", "8000")))
+    except ValueError:
+        max_chars = 8_000
+
+    kept: List[Dict[str, str]] = []
+    used = 0
+    for message in reversed(history):
+        if not isinstance(message, dict) or message.get("role") not in {"user", "assistant"}:
+            continue
+        content = str(message.get("content", "")).strip()
+        if not content:
+            continue
+        remaining = max_chars - used
+        if remaining <= 0:
+            break
+        clipped = content[-remaining:]
+        kept.append({"role": message["role"], "content": clipped})
+        used += len(clipped)
+    return list(reversed(kept))
+
 QUERY_PII_PATTERNS = {
     "AADHAAR": r"\b[2-9]\d{3}\s?\d{4}\s?\d{4}\b",
     "PAN": r"\b[A-Z]{5}\d{4}[A-Z]{1}\b",
@@ -85,7 +132,11 @@ def mask_text_pii(text: str, prefix: str = "PII") -> Tuple[str, Dict[str, str]]:
                 continue
 
             counter[entity_type] = counter.get(entity_type, 0) + 1
-            token = f"<{entity_type}_{prefix}_{counter[entity_type]}>"
+            token = (
+                f"<QUERY_{entity_type}_{counter[entity_type]}>"
+                if prefix == "Q"
+                else f"<{entity_type}_{counter[entity_type]}>"
+            )
             masked_str = masked_str.replace(val, token, 1)
             mapping[token] = val
 
@@ -133,11 +184,12 @@ class PrivacyRAGAgent:
     ):
         self.model_name = MODEL_MAPPING.get(model_name, model_name)
         self.groq_api_key = groq_api_key or os.getenv("GROQ_API_KEY")
-        self.current_document_id = "doc_default"
-        self.file_name = "doc_default"
+        self.current_document_id = None
+        self.file_name = ""
         self.doc_mappings: Dict[str, Dict[str, str]] = {}
         self.doc_texts: Dict[str, str] = {}
         self.doc_classifications: Dict[str, Any] = {}
+        self.file_names_by_doc_id: Dict[str, str] = {}
         self.masked_result = None
 
         # Initialize core AI Document Analyst & Orchestrator sub-modules
@@ -155,24 +207,14 @@ class PrivacyRAGAgent:
         """
         Resolves provided document_id or file_name to canonical document_id stored in doc_texts and document_cache.
         """
-        if document_id and document_id != "doc_default":
+        if document_id:
             if hasattr(self, "file_name_to_doc_id") and document_id in self.file_name_to_doc_id:
                 return self.file_name_to_doc_id[document_id]
-            if self.document_cache:
-                cached_doc = self.document_cache.get(document_id)
-                if cached_doc:
-                    return cached_doc.document_id
             if document_id in self.doc_texts:
                 return document_id
-
-        if self.document_cache and self.document_cache.get_latest_doc_id():
-            return self.document_cache.get_latest_doc_id()
-        if self.current_document_id and self.current_document_id != "doc_default" and self.current_document_id in self.doc_texts:
-            return self.current_document_id
-        if self.doc_texts:
-            return list(self.doc_texts.keys())[-1]
-
-        return document_id or self.current_document_id or "doc_default"
+            if self.document_cache and self.document_cache.has_document(document_id):
+                return document_id
+        return document_id or ""
 
     def ingest_masked_result(
         self,
@@ -183,14 +225,13 @@ class PrivacyRAGAgent:
         overlap: int = 120
     ) -> bool:
         """Ingests sanitized document text and mapping dictionary into cache, state, and vector store."""
-        doc_id = document_id or f"doc_{int(time.time())}"
+        doc_id = document_id or f"doc_{uuid.uuid4().hex}"
         self.current_document_id = doc_id
         self.file_name = file_name or doc_id
-        self.masked_result = masked_result
+        self.file_names_by_doc_id[doc_id] = self.file_name
 
         if not hasattr(self, "file_name_to_doc_id"):
             self.file_name_to_doc_id = {}
-        self.file_name_to_doc_id[self.file_name] = doc_id
         self.file_name_to_doc_id[doc_id] = doc_id
 
         if hasattr(masked_result, "masked_text"):
@@ -203,16 +244,19 @@ class PrivacyRAGAgent:
             masked_text = str(masked_result)
             mapping = {}
 
-        self.doc_texts[doc_id] = masked_text
-        self.doc_texts[self.file_name] = masked_text
-        self.doc_mappings[doc_id] = mapping
-        self.doc_mappings[self.file_name] = mapping
+        # Token names remain readable and reset per document. Isolation is
+        # provided by the document-keyed stores below, never by token text.
+        scoped_mapping: Dict[str, str] = dict(mapping)
+        scoped_text = masked_text
+
+        self.doc_texts[doc_id] = scoped_text
+        self.doc_mappings[doc_id] = scoped_mapping
 
         # Store in DocumentCache for instant document-level context assembly
         self.document_cache.store(
             document_id=doc_id,
-            masked_text=masked_text,
-            mapping=mapping,
+            masked_text=scoped_text,
+            mapping=scoped_mapping,
             file_name=self.file_name
         )
 
@@ -222,9 +266,9 @@ class PrivacyRAGAgent:
             f"DOCUMENT INGESTION\n"
             f"document_id={doc_id}\n"
             f"file_name={self.file_name}\n"
-            f"masked_text_length={len(masked_text)}\n"
-            f"masked_text_lines={len(masked_text.splitlines()) if masked_text else 0}\n"
-            f"mapping_count={len(mapping)}"
+            f"masked_text_length={len(scoped_text)}\n"
+            f"masked_text_lines={len(scoped_text.splitlines()) if scoped_text else 0}\n"
+            f"mapping_count={len(scoped_mapping)}"
         )
         logger.info(ingest_log)
         print(ingest_log, flush=True)
@@ -234,26 +278,62 @@ class PrivacyRAGAgent:
         print(ingest_id_log, flush=True)
 
         # Perform automatic Document Type Classification & Persona Assignment
-        cls_result = DocumentClassifier.classify(masked_text)
+        cls_result = DocumentClassifier.classify(scoped_text)
         self.doc_classifications[doc_id] = cls_result
 
-        chunks = self._chunk_text(masked_text, chunk_size=chunk_size, overlap=overlap)
+        chunks = self._chunk_text(scoped_text, chunk_size=chunk_size, overlap=overlap)
 
         if vector_store_manager:
+            db_session = None
             try:
+                try:
+                    from app.agents.db.database import db_manager
+                    db_session = db_manager.get_session()
+                except Exception:
+                    db_session = None
                 for idx, chk in enumerate(chunks, start=1):
                     emb = generate_text_embedding(chk)
                     vector_store_manager.store_sanitized_chunk(
+                        db_session=db_session,
                         document_id=doc_id,
+                        document_name=self.file_name,
                         text=chk,
                         embedding_vector=emb,
-                        page_ref=str(idx)
+                        page_ref=str(idx),
+                        chunk_index=idx
                     )
             except Exception as e:
                 logger.warning(f"Vector store chunk indexing notice: {e}")
+            finally:
+                if db_session:
+                    db_session.close()
 
         logger.info(f"Ingested document {doc_id} ({cls_result.doc_type} / Persona: {cls_result.persona}) -> {len(chunks)} chunks")
         return True
+
+    def _hydrate_document_state(self, document_id: str) -> bool:
+        """Reload persisted text and mapping for one document after restart."""
+        try:
+            from app.agents.db.database import db_manager
+            from pii_detector.db.models import DocumentModel
+            import json
+            with db_manager.get_session() as session:
+                document = session.get(DocumentModel, document_id)
+                if not document or not document.masked_text:
+                    return False
+                self.doc_texts[document_id] = document.masked_text
+                self.doc_mappings[document_id] = json.loads(document.token_mapping_json or "{}")
+                self.file_names_by_doc_id[document_id] = document.filename
+                self.document_cache.store(
+                    document_id=document_id,
+                    masked_text=document.masked_text,
+                    mapping=self.doc_mappings[document_id],
+                    file_name=document.filename,
+                )
+                return True
+        except Exception as exc:
+            logger.warning("Document state hydration failed for %s: %s", document_id, exc)
+            return False
 
     def _chunk_text(self, text: str, chunk_size: int = 450, overlap: int = 60) -> List[str]:
         """Splits document text into overlapping paragraph-aware chunks."""
@@ -291,6 +371,11 @@ class PrivacyRAGAgent:
 
         return chunks or [text]
 
+    @traceable(
+        name="privacyshield.rag.answer_query",
+        run_type="chain",
+        tags=["privacyshield", "rag", "pii-safe"],
+    )
     def answer_query(
         self,
         user_query: str,
@@ -316,31 +401,44 @@ class PrivacyRAGAgent:
         8. Response Formatter & Quality Review Self-Correction
         9. PII Token De-masking
         """
-        target_doc_id = self.resolve_document_id(document_id)
-        chat_id_log = f"CHAT DOCUMENT ID:\n{target_doc_id}"
+        if not document_id:
+            raise ValueError("No document context selected. Select at least one ready document before chatting.")
+
+        canonical_document_id = self.resolve_document_id(document_id)
+        # Rehydrate only the explicitly selected documents after a backend
+        # restart. Never hydrate or inspect the latest/other document.
+        self._hydrate_document_state(canonical_document_id)
+        if canonical_document_id not in self.doc_texts and not self.document_cache.has_document(canonical_document_id):
+            if vector_store_manager and hasattr(vector_store_manager, "hydrate_document"):
+                vector_store_manager.hydrate_document(canonical_document_id)
+                selected_chunks = [chunk for chunk in vector_store_manager.chunks_cache if chunk.get("document_id") == canonical_document_id]
+                selected_chunks.sort(key=lambda chunk: str(chunk.get("page_ref", "1")))
+                if selected_chunks:
+                    self.file_names_by_doc_id[canonical_document_id] = selected_chunks[0].get("document_name", canonical_document_id)
+                    self.doc_texts[canonical_document_id] = "\n\n".join(chunk.get("text", "") for chunk in selected_chunks)
+        if not canonical_document_id or (canonical_document_id not in self.doc_texts and not self.document_cache.has_document(canonical_document_id)):
+            raise ValueError(f"Requested document context is unavailable: {canonical_document_id}")
+
+        chat_id_log = f"CHAT DOCUMENT ID:\n{canonical_document_id}"
         logger.info(chat_id_log)
         print(chat_id_log, flush=True)
 
         # 1. Document Classification & Persona Lookup
-        doc_text = self.document_cache.get_full_text(target_doc_id) or self.doc_texts.get(target_doc_id, "")
-        cls_info = self.doc_classifications.get(target_doc_id)
+        doc_text = self.document_cache.get_full_text(canonical_document_id) or self.doc_texts.get(canonical_document_id, "")
+        cls_info = self.doc_classifications.get(canonical_document_id)
         if not cls_info:
             cls_info = DocumentClassifier.classify(doc_text)
-            self.doc_classifications[target_doc_id] = cls_info
+            self.doc_classifications[canonical_document_id] = cls_info
 
         doc_type = cls_info.doc_type
         persona = cls_info.persona
 
-        # Active PII token mapping dictionary
-        active_mapping = dict(self.doc_mappings.get(target_doc_id, {}))
-        if self.document_cache.has_document(target_doc_id):
-            active_mapping.update(self.document_cache.get_mapping(target_doc_id))
-        if self.masked_result and getattr(self.masked_result, "mapping", None):
-            active_mapping.update(self.masked_result.mapping)
+        active_mapping: Dict[str, str] = dict(self.doc_mappings.get(canonical_document_id, {}))
+        if self.document_cache.has_document(canonical_document_id):
+            active_mapping.update(self.document_cache.get_mapping(canonical_document_id))
 
         # 2. Mask user query PII
         masked_query, query_mapping = mask_query_pii(user_query)
-        active_mapping.update(query_mapping)
 
         # 3. Intent Classification
         intent_res = IntentClassifier.classify(masked_query)
@@ -350,15 +448,16 @@ class PrivacyRAGAgent:
         orchestration_plan = DocumentOrchestrator.orchestrate(
             query=masked_query,
             intent=intent,
-            has_active_document=bool(target_doc_id and doc_text)
+            has_active_document=bool(doc_text)
         )
 
         # 5. Build context using selected orchestration strategy (FULL_DOCUMENT, SEMANTIC_RETRIEVAL, or HYBRID)
         context_res = ContextBuilder.build_context(
             intent=intent,
             query=masked_query,
-            document_id=target_doc_id,
+            document_id=canonical_document_id,
             doc_texts=self.doc_texts,
+            document_name=self.file_names_by_doc_id.get(canonical_document_id, canonical_document_id),
             vector_store_manager=vector_store_manager,
             top_k=top_k,
             context_strategy=orchestration_plan.context_strategy
@@ -369,7 +468,7 @@ class PrivacyRAGAgent:
         source_attributions = context_res.source_attributions
 
         # Log pipeline orchestration details
-        cache_status = "HIT" if (self.document_cache and self.document_cache.has_document(target_doc_id)) else "MISS"
+        cache_status = "HIT" if self.document_cache.has_document(canonical_document_id) else "MISS"
         chunks_count = 0 if context_res.is_full_document else len(retrieved_chunks)
         logger.info(
             f"[ORCHESTRATION PIPELINE] Intent: {intent.upper()} | "
@@ -381,9 +480,9 @@ class PrivacyRAGAgent:
         )
 
         # Safety net sanitization on retrieved context
-        if context_block and context_block not in ["No matching document context found.", "No document has been ingested."]:
-            context_block, extra_map = mask_text_pii(context_block, prefix="CTX")
-            active_mapping.update(extra_map)
+        if context_block and context_block not in ["No matching document context found.", "No document has been ingested.", "No selected document has been ingested."]:
+            context_block, _ = mask_text_pii(context_block, prefix="CTX")
+        context_block = _bounded_prompt_context(context_block)
 
         # 6. Assemble chat messages with persona & reasoning prompts
         messages = PromptManager.build_messages(
@@ -392,7 +491,7 @@ class PrivacyRAGAgent:
             query=masked_query,
             doc_type=doc_type,
             persona=persona,
-            history=history
+            history=_bounded_history(history)
         )
 
         # 7. Route generation to LLM (Groq -> Local Qwen -> Smart Synthesis)
@@ -404,12 +503,12 @@ class PrivacyRAGAgent:
         first_200 = context_block[:200] if context_block else ""
         last_200 = context_block[-200:] if context_block and len(context_block) > 200 else first_200
         context_lines = len(context_block.splitlines()) if context_block else 0
-        document_cache_hit = "TRUE" if (self.document_cache and self.document_cache.has_document(target_doc_id)) else "FALSE"
+        document_cache_hit = "TRUE" if cache_status == "HIT" else "FALSE"
         retrieved_chunks_count = 0 if context_res.is_full_document else len(retrieved_chunks)
 
         llm_debug_log = (
             f"LLM CONTEXT DEBUG\n"
-            f"document_id={target_doc_id}\n"
+            f"document_id={canonical_document_id}\n"
             f"intent={intent}\n"
             f"context_strategy={context_res.context_strategy_used}\n"
             f"context_length={len(context_block)}\n"
@@ -476,8 +575,12 @@ class PrivacyRAGAgent:
             "latency_ms": latency_ms,
             "request_id": request_id,
             "mapping": active_mapping,
-            "file_name": self.file_name,
-            "sources_retrieved": [c.get("chunk_id", f"chunk_{i}") for i, c in enumerate(retrieved_chunks)],
+            "file_name": self.file_names_by_doc_id.get(canonical_document_id, canonical_document_id),
+            "document_id": canonical_document_id,
+            "sources_retrieved": [
+                f"{self.file_names_by_doc_id.get(c.get('document_id', ''), c.get('document_id', 'document'))} · p. {c.get('page_ref', c.get('page', '1'))}"
+                for c in retrieved_chunks
+            ],
             "privacy_guarantee": "Zero raw PII transmitted to Groq cloud API",
             "intent": intent,
             "intent_confidence": intent_res.confidence,
@@ -508,28 +611,31 @@ class PrivacyRAGAgent:
         if not api_key:
             raise ValueError("Groq API Key is missing. Please set GROQ_API_KEY environment variable or pass groq_api_key.")
 
-        target_doc_id = self.resolve_document_id(document_id)
-        chat_id_log = f"CHAT DOCUMENT ID:\n{target_doc_id}"
+        if not document_id:
+            raise ValueError("No document context selected. Select at least one ready document before chatting.")
+        canonical_document_id = self.resolve_document_id(document_id)
+        self._hydrate_document_state(canonical_document_id)
+        if not canonical_document_id or (canonical_document_id not in self.doc_texts and not self.document_cache.has_document(canonical_document_id)):
+            raise ValueError(f"Requested document context is unavailable: {canonical_document_id}")
+
+        chat_id_log = f"CHAT DOCUMENT ID:\n{canonical_document_id}"
         logger.info(chat_id_log)
         print(chat_id_log, flush=True)
 
-        doc_text = self.document_cache.get_full_text(target_doc_id) or self.doc_texts.get(target_doc_id, "")
-        cls_info = self.doc_classifications.get(target_doc_id)
+        doc_text = self.document_cache.get_full_text(canonical_document_id) or self.doc_texts.get(canonical_document_id, "")
+        cls_info = self.doc_classifications.get(canonical_document_id)
         if not cls_info:
             cls_info = DocumentClassifier.classify(doc_text)
-            self.doc_classifications[target_doc_id] = cls_info
+            self.doc_classifications[canonical_document_id] = cls_info
 
         doc_type = cls_info.doc_type
         persona = cls_info.persona
 
-        active_mapping = dict(self.doc_mappings.get(target_doc_id, {}))
-        if self.document_cache.has_document(target_doc_id):
-            active_mapping.update(self.document_cache.get_mapping(target_doc_id))
-        if self.masked_result and getattr(self.masked_result, "mapping", None):
-            active_mapping.update(self.masked_result.mapping)
+        active_mapping: Dict[str, str] = dict(self.doc_mappings.get(canonical_document_id, {}))
+        if self.document_cache.has_document(canonical_document_id):
+            active_mapping.update(self.document_cache.get_mapping(canonical_document_id))
 
-        masked_query, query_mapping = mask_query_pii(user_query)
-        active_mapping.update(query_mapping)
+        masked_query, _ = mask_query_pii(user_query)
 
         intent_res = IntentClassifier.classify(masked_query)
         intent = intent_res.intent
@@ -537,23 +643,24 @@ class PrivacyRAGAgent:
         orchestration_plan = DocumentOrchestrator.orchestrate(
             query=masked_query,
             intent=intent,
-            has_active_document=bool(target_doc_id and doc_text)
+            has_active_document=bool(doc_text)
         )
 
         context_res = ContextBuilder.build_context(
             intent=intent,
             query=masked_query,
-            document_id=target_doc_id,
+            document_id=canonical_document_id,
             doc_texts=self.doc_texts,
+            document_name=self.file_names_by_doc_id.get(canonical_document_id, canonical_document_id),
             vector_store_manager=vector_store_manager,
             top_k=top_k,
             context_strategy=orchestration_plan.context_strategy
         )
         context_block = context_res.context_block
 
-        if context_block and context_block not in ["No matching document context found.", "No document has been ingested."]:
-            context_block, extra_map = mask_text_pii(context_block, prefix="CTX")
-            active_mapping.update(extra_map)
+        if context_block and context_block not in ["No matching document context found.", "No document has been ingested.", "No selected document has been ingested."]:
+            context_block, _ = mask_text_pii(context_block, prefix="CTX")
+        context_block = _bounded_prompt_context(context_block)
 
         messages = PromptManager.build_messages(
             intent=intent,
@@ -561,7 +668,7 @@ class PrivacyRAGAgent:
             query=masked_query,
             doc_type=doc_type,
             persona=persona,
-            history=history
+            history=_bounded_history(history)
         )
 
         requested_model = model_name or self.model_name
@@ -570,12 +677,12 @@ class PrivacyRAGAgent:
         first_200 = context_block[:200] if context_block else ""
         last_200 = context_block[-200:] if context_block and len(context_block) > 200 else first_200
         context_lines = len(context_block.splitlines()) if context_block else 0
-        document_cache_hit = "TRUE" if (self.document_cache and self.document_cache.has_document(target_doc_id)) else "FALSE"
+        document_cache_hit = "TRUE" if self.document_cache.has_document(canonical_document_id) else "FALSE"
         retrieved_chunks_count = 0 if context_res.is_full_document else len(context_res.retrieved_chunks)
 
         llm_debug_log = (
             f"LLM CONTEXT DEBUG\n"
-            f"document_id={target_doc_id}\n"
+            f"document_id={canonical_document_id}\n"
             f"intent={intent}\n"
             f"context_strategy={context_res.context_strategy_used}\n"
             f"context_length={len(context_block)}\n"

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   ShieldAlert,
   ShieldCheck,
@@ -13,20 +13,31 @@ import {
   Check,
   Sliders,
   Tag,
-  Paperclip,
+  Plus,
   Columns,
   Sparkles,
   Download,
   Layers,
   FileCheck,
 } from 'lucide-react';
-import { redactPII, PIIRedactResponse, extractTextFromFile } from '@/lib/api';
+import {
+  redactPII,
+  PIIRedactResponse,
+  extractTextFromFile,
+  listDocuments,
+  getDocumentDetail,
+  registerDocument,
+  applyDocumentMasking,
+  ChatDocument,
+  ProcessedDocument,
+  PIIMatch,
+} from '@/lib/api';
 
 export function LiveRedactionSection() {
-  const [inputText, setInputText] = useState<string>(
-    'Patient Rajesh Kumar (Aadhaar: 4521 8901 2345, PAN: ABCDE1234F) can be reached at rajesh.kumar@gmail.com or +91 9876543210. Primary credit card on file for billing: 4532 8900 1234 5678.'
-  );
-  const [attachedFileName, setAttachedFileName] = useState<string | null>('sample_patient_record.txt');
+  const [inputText, setInputText] = useState<string>('');
+  const [documentLibrary, setDocumentLibrary] = useState<ChatDocument[]>([]);
+  const [selectedDocumentId, setSelectedDocumentId] = useState<string>('');
+  const [loadingDocument, setLoadingDocument] = useState<boolean>(false);
   const [maskingStrategy, setMaskingStrategy] = useState<string>('REPLACE');
   const [loading, setLoading] = useState<boolean>(false);
   const [result, setResult] = useState<PIIRedactResponse | null>(null);
@@ -34,12 +45,106 @@ export function LiveRedactionSection() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const toRedactionResult = (document: ProcessedDocument): PIIRedactResponse => ({
+    original_text: document.original_text,
+    redacted_text: document.masked_text,
+    entities: (document.entities || []).map((entity) => ({
+      entity_type: entity.entity_type || (entity as PIIMatch & { label?: string }).label || 'PII',
+      text: entity.text,
+      start: entity.start || 0,
+      end: entity.end || 0,
+      score: entity.score ?? 1,
+    })),
+    risk_score: document.risk_score || 0,
+    risk_level: (document.risk_score || 0) > 60 ? 'HIGH' : (document.risk_score || 0) >= 30 ? 'MEDIUM' : 'LOW',
+    compliance_passed: true,
+    classification: document.classification ? {
+      category: document.classification,
+      sensitivity: 'HIGH',
+      confidence: 1,
+      summary: 'Persisted document classification',
+      compliance_frameworks: [],
+    } : undefined,
+  });
+
+  const loadDocument = async (documentId: string) => {
+    setSelectedDocumentId(documentId);
+    setInputText('');
+    setResult(null);
+    if (!documentId) return;
+    setLoadingDocument(true);
+    try {
+      const document = await getDocumentDetail(documentId);
+      setInputText(document.original_text);
+      setResult(toRedactionResult(document));
+    } catch (err) {
+      console.error('Document details failed:', err);
+    } finally {
+      setLoadingDocument(false);
+    }
+  };
+
+  const refreshDocuments = async (preferredId?: string) => {
+    const documents = await listDocuments();
+    setDocumentLibrary(documents);
+    const ready = documents.filter((document) => document.status === 'READY');
+    const nextId = preferredId && ready.some((document) => document.id === preferredId)
+      ? preferredId
+      : ready[0]?.id || '';
+    if (nextId) await loadDocument(nextId);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    listDocuments().then(async (documents) => {
+      if (cancelled) return;
+      setDocumentLibrary(documents);
+      const ready = documents.filter((document) => document.status === 'READY');
+      if (ready[0]) await loadDocument(ready[0].id);
+    }).catch((err) => console.error('Document library failed:', err));
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleDocumentDeleted = (event: Event) => {
+      const deletedId = (event as CustomEvent<string>).detail;
+      if (typeof deletedId !== 'string') return;
+      setDocumentLibrary((documents) => documents.filter((document) => document.id !== deletedId));
+      if (selectedDocumentId === deletedId) {
+        setSelectedDocumentId('');
+        setInputText('');
+        setResult(null);
+      }
+    };
+    window.addEventListener('privacyshield:document-deleted', handleDocumentDeleted);
+    return () => window.removeEventListener('privacyshield:document-deleted', handleDocumentDeleted);
+  }, [selectedDocumentId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleAllDataDeleted = () => {
+      setDocumentLibrary([]);
+      setSelectedDocumentId('');
+      setInputText('');
+      setResult(null);
+    };
+    window.addEventListener('privacyshield:all-data-deleted', handleAllDataDeleted);
+    return () => window.removeEventListener('privacyshield:all-data-deleted', handleAllDataDeleted);
+  }, []);
+
   const handleRedact = async () => {
     if (!inputText.trim()) return;
     setLoading(true);
     try {
       const res = await redactPII(inputText, maskingStrategy);
-      setResult(res);
+      if (selectedDocumentId) {
+        const persisted = await applyDocumentMasking(selectedDocumentId, inputText, res.entities);
+        await refreshDocuments(selectedDocumentId);
+        setResult({ ...res, original_text: inputText, redacted_text: persisted.masked_text });
+      } else {
+        setResult(res);
+      }
     } catch (err) {
       console.error('Redact error:', err);
     } finally {
@@ -50,13 +155,15 @@ export function LiveRedactionSection() {
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setAttachedFileName(file.name);
     setLoading(true);
     try {
       const text = await extractTextFromFile(file);
       setInputText(text);
       const res = await redactPII(text, maskingStrategy);
-      setResult(res);
+      const registered = await registerDocument(file.name, file.type || 'application/octet-stream');
+      const persisted = await applyDocumentMasking(registered.id, text, res.entities);
+      await refreshDocuments(registered.id);
+      setResult({ ...res, original_text: text, redacted_text: persisted.masked_text });
     } catch (err) {
       console.error('File analysis error:', err);
     } finally {
@@ -82,27 +189,38 @@ export function LiveRedactionSection() {
       return <div className="whitespace-pre-wrap">{inputText}</div>;
     }
 
-    const sortedEntities = [...result.entities].sort((a, b) => a.start - b.start);
+    const sortedEntities = [...result.entities].sort((a, b) => a.start - b.start || (b.end - b.start) - (a.end - a.start));
     const elements = [];
     let lastIndex = 0;
 
     sortedEntities.forEach((ent, idx) => {
-      if (ent.start > lastIndex) {
-        elements.push(inputText.substring(lastIndex, ent.start));
+      let start = ent.start;
+      let end = ent.end;
+      if (start < lastIndex || inputText.substring(start, end) !== ent.text) {
+        // Persisted OCR/PDF offsets can drift when whitespace is normalized.
+        // Anchor the entity to its actual text from the current source rather
+        // than rendering a highlight at a stale character offset.
+        start = inputText.indexOf(ent.text, lastIndex);
+        if (start < 0) start = inputText.indexOf(ent.text);
+        if (start < 0) return;
+        end = start + ent.text.length;
+      }
+      if (start > lastIndex) {
+        elements.push(inputText.substring(lastIndex, start));
       }
       elements.push(
         <span
           key={`highlight-${idx}`}
-          className="relative inline-block px-1.5 py-0.5 mx-0.5 rounded bg-cyan-950/80 border border-cyan-500/50 text-cyan-300 font-bold group cursor-pointer"
+          className="relative inline-flex items-center whitespace-nowrap px-1 py-0.5 mx-0.5 rounded bg-cyan-950/80 border border-cyan-500/50 text-cyan-300 font-bold leading-tight group cursor-pointer"
           title={`Detected PII: ${ent.entity_type} (Confidence: ${intToPercent(ent.score)})`}
         >
           {ent.text}
-          <span className="ml-1 text-[9px] px-1 py-0.2 rounded bg-cyan-800 text-cyan-200 font-mono">
+          <span className="ml-1 inline-flex text-[9px] leading-none px-1 py-0.5 rounded bg-cyan-800 text-cyan-200 font-mono">
             {ent.entity_type}
           </span>
         </span>
       );
-      lastIndex = Math.max(lastIndex, ent.end);
+      lastIndex = Math.max(lastIndex, end);
     });
 
     if (lastIndex < inputText.length) {
@@ -117,7 +235,7 @@ export function LiveRedactionSection() {
   };
 
   return (
-    <div className="p-6 space-y-6 max-w-7xl mx-auto overflow-y-auto">
+    <div className="h-full min-h-0 p-6 space-y-6 max-w-7xl mx-auto overflow-y-auto">
       {/* Hidden File Input */}
       <input
         type="file"
@@ -139,13 +257,32 @@ export function LiveRedactionSection() {
         </div>
 
         <div className="flex items-center gap-3">
+          <label className="flex items-center gap-2 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-300">
+            <FileCheck className="h-3.5 w-3.5 text-cyan-400" />
+            <span className="text-slate-400">Document:</span>
+            <select
+              value={selectedDocumentId}
+              onChange={(e) => void loadDocument(e.target.value)}
+              disabled={loadingDocument || documentLibrary.length === 0}
+              className="max-w-[220px] bg-transparent text-cyan-300 font-bold focus:outline-none cursor-pointer"
+            >
+              {documentLibrary.length === 0 && <option value="">No ready documents</option>}
+              {documentLibrary.map((document) => (
+                <option key={document.id} value={document.id} disabled={document.status !== 'READY'}>
+                  {document.filename}{document.status !== 'READY' ? ` (${document.status})` : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+
           <button
             onClick={triggerFilePicker}
             disabled={loading}
-            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 text-xs font-semibold transition shadow-md cursor-pointer"
+            className="h-10 w-14 flex items-center justify-center rounded-md bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 text-xs font-semibold transition shadow-md cursor-pointer"
+            title="Attach file"
+            aria-label="Attach file"
           >
-            <Paperclip className="h-4 w-4 text-cyan-400" />
-            <span>{attachedFileName ? `File: ${attachedFileName}` : 'Attach File'}</span>
+            <Plus className="h-5 w-5 text-cyan-400" />
           </button>
 
           <div className="flex items-center gap-2 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-300">
@@ -180,7 +317,7 @@ export function LiveRedactionSection() {
             <FileText className="h-4 w-4 text-cyan-400" /> Input Payload Text / File Source
           </label>
           <span className="text-[10px] text-slate-500 font-mono">
-            {inputText.length} characters {attachedFileName ? `• ${attachedFileName}` : ''}
+            {inputText.length} characters
           </span>
         </div>
         <textarea

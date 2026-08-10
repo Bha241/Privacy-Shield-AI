@@ -1,4 +1,5 @@
 import sys
+import asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -23,12 +24,25 @@ from app.core.config import settings
 from app.core.database import init_db
 from app.api.v1.router import api_v1_router
 from app.agents.web.app import app as multi_agent_app
+from app.agents.db.retention import retention_scheduler_loop, run_daily_retention_cleanup
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize DB tables on startup
     await init_db()
-    yield
+    # Run a catch-up pass on startup, then keep one backend-owned daily loop.
+    # The retention service uses a PostgreSQL advisory lock for multi-instance safety.
+    try:
+        await asyncio.to_thread(run_daily_retention_cleanup)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("Initial retention cleanup failed")
+    scheduler_task = asyncio.create_task(retention_scheduler_loop())
+    try:
+        yield
+    finally:
+        scheduler_task.cancel()
+        await asyncio.gather(scheduler_task, return_exceptions=True)
 
 app = FastAPI(
     title=settings.PROJECT_NAME,

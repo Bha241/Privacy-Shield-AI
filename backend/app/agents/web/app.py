@@ -295,92 +295,6 @@ async def detect_pii_on_the_go(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# --- MULTI-FILE BATCH PII DETECTION ENDPOINT ---
-@app.post("/api/detect_batch")
-async def detect_pii_batch(
-    files: List[UploadFile] = File(...),
-    domain: Optional[str] = Form("general")
-):
-    """
-    On-the-go PII detection for multiple uploaded documents.
-    Extracts text, aggregates candidate entities across all files, and prepares multi-document session.
-    """
-    try:
-        if current_session.get("mode") == "pending_hitl" and current_session.get("raw_text"):
-            combined_raw_text = current_session["raw_text"]
-            all_detected_entities = current_session.get("candidate_entities", [])
-            file_names = [f for f in current_session.get("file_name", "").split(", ") if f]
-        else:
-            combined_raw_text = ""
-            all_detected_entities = []
-            file_names = []
-
-        for idx, file in enumerate(files, start=1):
-            file_names.append(file.filename)
-            saved_path = UPLOAD_DIR / file.filename
-            with open(saved_path, "wb") as f:
-                shutil.copyfileobj(file.file, f)
-
-            res = get_detection_agent().process_file_on_the_go(str(saved_path), domain=domain or "general")
-            if res["status"] != "empty":
-                header_str = f"\n\n--- Document {len(file_names)}: {file.filename} ---\n\n"
-                doc_start_offset = len(combined_raw_text) + len(header_str)
-                combined_raw_text += header_str + res["raw_text"]
-
-                for e in res["detected_entities"]:
-                    e_copy = dict(e)
-                    e_copy["id"] = len(all_detected_entities) + 1
-                    e_copy["file_name"] = file.filename
-                    # Shift start and end offsets to match position in combined_raw_text
-                    e_copy["start"] = e.get("start", 0) + doc_start_offset
-                    e_copy["end"] = e.get("end", 0) + doc_start_offset
-                    all_detected_entities.append(e_copy)
-
-        if not combined_raw_text.strip():
-            raise HTTPException(status_code=400, detail="No readable text found in uploaded documents.")
-
-        combined_filename = ", ".join(file_names)
-        document_id = current_session.get("document_id") or f"batch_{uuid.uuid4().hex[:12]}"
-
-        # Persist Document record in DB for PostgreSQL Foreign Keys
-        db = db_manager.get_session()
-        try:
-            doc_rec = db.query(DocumentModel).filter(DocumentModel.document_id == document_id).first()
-            if not doc_rec:
-                doc_rec = DocumentModel(
-                    document_id=document_id,
-                    filename=combined_filename,
-                    category="General",
-                    risk_score=0.0,
-                    status=DocumentStatusEnum.PENDING.value
-                )
-                db.add(doc_rec)
-                db.commit()
-        finally:
-            db.close()
-
-        current_session["document_id"] = document_id
-        current_session["file_name"] = combined_filename
-        current_session["raw_text"] = combined_raw_text
-        current_session["candidate_entities"] = all_detected_entities
-        current_session["domain"] = domain or "general"
-        current_session["mode"] = "pending_hitl"
-
-
-        return JSONResponse({
-            "status": "success",
-            "document_id": document_id,
-            "file_name": combined_filename,
-            "total_files": len(file_names),
-            "raw_text": combined_raw_text,
-            "candidate_entities": all_detected_entities,
-            "total_detected": len(all_detected_entities),
-            "domain": domain or "general"
-        })
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @app.post("/api/clear_session")
 async def clear_active_session():
     """Resets active workspace session."""
@@ -1036,4 +950,3 @@ async def resume_langgraph_hitl(payload: Dict[str, Any] = Body(...)):
         })
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"LangGraph resume error: {str(e)}")
-

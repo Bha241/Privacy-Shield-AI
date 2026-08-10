@@ -42,10 +42,10 @@ class RiskAgent:
         multiplier = self.CATEGORY_WEIGHTS.get(document_category, 1.0)
         final_score = round(min(100.0, base_score * multiplier), 1)
 
-        if final_score >= 50 or "AADHAAR" in type_counts or "PAN" in type_counts or document_category in ["Medical", "Financial"]:
+        if final_score > 60:
             risk_category = "High"
             route_to_hitl = True
-        elif final_score >= 20:
+        elif final_score >= 30:
             risk_category = "Medium"
             route_to_hitl = False
         else:

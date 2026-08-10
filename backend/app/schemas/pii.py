@@ -36,11 +36,14 @@ class LLMSettings(BaseModel):
     model: str = "Llama-3-70b-PrivacyGuard"
 
 class ChatMessageRequest(BaseModel):
-    message: str
+    message: Optional[str] = None
+    query: Optional[str] = None
     original_text: Optional[str] = ""
     redacted_text: Optional[str] = ""
     entities: Optional[List[EntityMatch]] = None
     document_id: Optional[str] = None
+    owner_id: str = "usr_admin"
+    organization_id: str = "org_default"
     file_name: Optional[str] = None
     llm_settings: Optional[LLMSettings] = None
 
@@ -55,4 +58,4 @@ class ChatMessageResponse(BaseModel):
     fallback_reason: Optional[str] = None
     latency_ms: Optional[int] = None
     request_id: Optional[str] = None
-
+    document_id: str

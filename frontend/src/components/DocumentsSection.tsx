@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Folder,
   Upload,
@@ -11,53 +11,65 @@ import {
   CheckCircle,
   X,
   File,
+  AlertTriangle,
 } from 'lucide-react';
-import { uploadDocument, DocumentItem } from '@/lib/api';
+import {
+  DocumentItem,
+  listDocuments,
+  registerDocument,
+  extractTextFromFile,
+  redactPII,
+  applyDocumentMasking,
+  deleteDocument,
+} from '@/lib/api';
 
 interface DocumentsSectionProps {
-  onSelectDocForChat?: (docName: string) => void;
+  onSelectDocForChat?: (documentId: string) => void;
 }
 
 export function DocumentsSection({ onSelectDocForChat }: DocumentsSectionProps) {
-  const [documents, setDocuments] = useState<DocumentItem[]>([
-    {
-      id: 'doc-1',
-      filename: 'patient_records.pdf',
-      size: '2.4 MB',
-      category: 'Healthcare & PHI',
-      sensitivity: 'RESTRICTED',
-      risk_score: 85,
-      char_count: 14500,
-      status: 'INDEXED',
-      created_at: '2026-08-05 14:30',
-    },
-    {
-      id: 'doc-2',
-      filename: 'financial_audit_2026.docx',
-      size: '1.1 MB',
-      category: 'Financial & Tax',
-      sensitivity: 'HIGH',
-      risk_score: 65,
-      char_count: 8900,
-      status: 'INDEXED',
-      created_at: '2026-08-04 09:15',
-    },
-    {
-      id: 'doc-3',
-      filename: 'employee_roster_pan.xlsx',
-      size: '850 KB',
-      category: 'HR Operations',
-      sensitivity: 'MEDIUM',
-      risk_score: 40,
-      char_count: 5200,
-      status: 'INDEXED',
-      created_at: '2026-08-02 11:45',
-    },
-  ]);
+  const [documents, setDocuments] = useState<DocumentItem[]>([]);
 
   const [searchTerm, setSearchTerm] = useState('');
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<DocumentItem | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+
+  const refreshDocuments = async () => {
+    const library = await listDocuments();
+    setDocuments(library.map((document) => ({
+      id: document.id,
+      filename: document.filename,
+      size: '—',
+      category: document.category || document.classification || 'General',
+      sensitivity: (document.risk_score || 0) > 60 ? 'HIGH' : (document.risk_score || 0) >= 30 ? 'MEDIUM' : 'LOW',
+      risk_score: document.risk_score || 0,
+      char_count: 0,
+      status: document.status === 'READY' ? 'INDEXED' : 'PROCESSING',
+      created_at: document.created_at || '',
+    })));
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    listDocuments().then((library) => {
+      if (cancelled) return;
+      setDocuments(library.map((document) => ({
+        id: document.id,
+        filename: document.filename,
+        size: '—',
+        category: document.category || document.classification || 'General',
+      sensitivity: (document.risk_score || 0) > 60 ? 'HIGH' : (document.risk_score || 0) >= 30 ? 'MEDIUM' : 'LOW',
+        risk_score: document.risk_score || 0,
+        char_count: 0,
+        status: document.status === 'READY' ? 'INDEXED' : 'PROCESSING',
+        created_at: document.created_at || '',
+      })));
+    }).catch((err) => console.error('Document library failed:', err));
+    return () => { cancelled = true; };
+  }, []);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -65,24 +77,37 @@ export function DocumentsSection({ onSelectDocForChat }: DocumentsSectionProps) 
 
     setUploading(true);
     try {
-      const res = await uploadDocument(file);
-      const newDoc: DocumentItem = {
-        id: `doc-${Date.now()}`,
-        filename: file.name,
-        size: `${(file.size / 1024 / 1024).toFixed(1)} MB`,
-        category: 'Multi-Modal Upload',
-        sensitivity: 'HIGH',
-        risk_score: 50,
-        char_count: 3500,
-        status: 'INDEXED',
-        created_at: new Date().toISOString().replace('T', ' ').substring(0, 16),
-      };
-      setDocuments((prev) => [newDoc, ...prev]);
+      const registered = await registerDocument(file.name, file.type || 'application/octet-stream');
+      const text = await extractTextFromFile(file);
+      const analysis = await redactPII(text);
+      await applyDocumentMasking(registered.id, text, analysis.entities);
+      await refreshDocuments();
       setShowUploadModal(false);
     } catch (err) {
       console.error('Upload failed:', err);
     } finally {
       setUploading(false);
+    }
+  };
+
+  const handleDeleteDocument = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    setDeleteError('');
+    try {
+      await deleteDocument(deleteTarget.id);
+      setDocuments((current) => current.filter((document) => document.id !== deleteTarget.id));
+      if (typeof window !== 'undefined') {
+        if (window.localStorage.getItem('privacyshield:selected-document-id') === deleteTarget.id) {
+          window.localStorage.removeItem('privacyshield:selected-document-id');
+        }
+        window.dispatchEvent(new CustomEvent('privacyshield:document-deleted', { detail: deleteTarget.id }));
+      }
+      setDeleteTarget(null);
+    } catch (error: unknown) {
+      setDeleteError(error instanceof Error ? error.message : 'Unable to delete document');
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -173,14 +198,17 @@ export function DocumentsSection({ onSelectDocForChat }: DocumentsSectionProps) 
                 <td className="py-3.5 px-4 text-right space-x-2">
                   {onSelectDocForChat && (
                     <button
-                      onClick={() => onSelectDocForChat(doc.filename)}
+                      onClick={() => onSelectDocForChat(doc.id)}
                       className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-cyan-400 font-sans rounded-lg transition text-[11px] inline-flex items-center gap-1"
                     >
                       <MessageSquareText className="h-3 w-3" /> RAG Chat
                     </button>
                   )}
                   <button
-                    onClick={() => setDocuments(documents.filter((d) => d.id !== doc.id))}
+                    onClick={() => {
+                      setDeleteError('');
+                      setDeleteTarget(doc);
+                    }}
                     className="p-1 text-slate-500 hover:text-rose-400 transition"
                     title="Delete document"
                   >
@@ -193,9 +221,29 @@ export function DocumentsSection({ onSelectDocForChat }: DocumentsSectionProps) 
         </table>
       </div>
 
+      {deleteTarget && (
+        <div className="workspace-modal fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4" role="dialog" aria-modal="true" aria-labelledby="delete-document-title">
+          <div className="bg-slate-900 border border-rose-900/70 p-6 rounded-2xl max-w-md w-full space-y-4 shadow-2xl">
+            <div className="flex items-start gap-3">
+              <div className="rounded-xl bg-rose-950/60 p-2 text-rose-300"><AlertTriangle className="h-5 w-5" /></div>
+              <div>
+                <h3 id="delete-document-title" className="text-lg font-bold text-white">Delete document permanently?</h3>
+                <p className="text-xs text-slate-400 mt-1 break-all">{deleteTarget.filename}</p>
+              </div>
+            </div>
+            <p className="text-xs text-slate-300 leading-relaxed">This document and all associated protected data will be deleted immediately, including original and masked text, PII mappings, entities, and vector chunks. This action cannot be undone.</p>
+            {deleteError && <p className="text-xs text-rose-300 border border-rose-900/60 bg-rose-950/30 rounded-lg p-3">{deleteError}</p>}
+            <div className="flex justify-end gap-2 pt-2">
+              <button onClick={() => setDeleteTarget(null)} disabled={deleting} className="px-4 py-2 rounded-xl border border-slate-700 text-slate-300 text-xs hover:bg-slate-800 disabled:opacity-50">Cancel</button>
+              <button onClick={() => void handleDeleteDocument()} disabled={deleting} className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold disabled:opacity-50">{deleting ? 'Deleting...' : 'Delete permanently'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Multi-Modal Upload Modal */}
       {showUploadModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+        <div className="workspace-modal fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
           <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl max-w-md w-full space-y-4 shadow-2xl relative">
             <button
               onClick={() => setShowUploadModal(false)}

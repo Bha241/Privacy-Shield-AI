@@ -31,7 +31,6 @@ class DocumentCache:
 
     def __init__(self):
         self._cache: Dict[str, CachedDocument] = {}
-        self._latest_doc_id: Optional[str] = None
 
     def store(
         self,
@@ -58,26 +57,16 @@ class DocumentCache:
             word_count=words
         )
 
+        # The canonical document ID is the only cache key. Filenames are not
+        # unique and must never become aliases for another document's state.
         self._cache[document_id] = doc
-        if file_name:
-            self._cache[file_name] = doc
-        self._latest_doc_id = document_id
         return doc
 
     def get(self, document_id: Optional[str] = None) -> Optional[CachedDocument]:
-        """Retrieves a cached document by ID or filename, falling back to the latest ingested document."""
-        if document_id and document_id in self._cache:
-            return self._cache[document_id]
-        if document_id:
-            for doc in self._cache.values():
-                if doc.file_name == document_id:
-                    return doc
-        if self._latest_doc_id and self._latest_doc_id in self._cache:
-            return self._cache[self._latest_doc_id]
-        if self._cache:
-            latest_id = list(self._cache.keys())[-1]
-            return self._cache[latest_id]
-        return None
+        """Retrieves only the explicitly requested canonical document ID."""
+        if not document_id:
+            return None
+        return self._cache.get(document_id)
 
     def get_full_text(self, document_id: Optional[str] = None) -> str:
         """Returns the full masked text of a document."""
@@ -90,19 +79,21 @@ class DocumentCache:
         return dict(doc.mapping) if doc else {}
 
     def get_latest_doc_id(self) -> Optional[str]:
-        """Returns the ID of the most recently ingested document."""
-        return self._latest_doc_id
+        """Compatibility helper; callers must not use this as chat context."""
+        return None
 
     def has_document(self, document_id: Optional[str] = None) -> bool:
         """Checks if a document exists in cache."""
-        if document_id:
-            if document_id in self._cache:
-                return True
-            for doc in self._cache.values():
-                if doc.file_name == document_id:
-                    return True
-            return False
-        return bool(self._cache)
+        return bool(document_id and document_id in self._cache)
+
+    def remove(self, document_id: str) -> None:
+        """Invalidate one document after retention purge."""
+        self._cache.pop(document_id, None)
+
+    def remove_many(self, document_ids: set[str]) -> None:
+        """Invalidate expired documents without touching other cached documents."""
+        for document_id in document_ids:
+            self.remove(document_id)
 
 
 # Global Singleton Document Cache Instance

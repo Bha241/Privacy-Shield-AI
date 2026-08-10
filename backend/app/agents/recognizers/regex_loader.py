@@ -21,6 +21,11 @@ class RegexLoader:
         self.patterns = {}
 
         for label, info in data.items():
+            # DOB is handled by StructuredRecognizer, which validates calendar
+            # dates. Do not retain the legacy shape-only rule here because it
+            # accepts impossible values such as 31/02/1990.
+            if label == "DATE_OF_BIRTH":
+                continue
             self.patterns[label] = {
                 "regex": re.compile(info["regex"], re.IGNORECASE),
                 "confidence": info["confidence"],

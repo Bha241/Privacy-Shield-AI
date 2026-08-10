@@ -3,7 +3,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   Send,
-  Paperclip,
   ShieldCheck,
   Eye,
   EyeOff,
@@ -27,6 +26,7 @@ import {
   Columns,
   Files,
   UploadCloud,
+  ChevronDown,
 } from 'lucide-react';
 import {
   sendChatMessage,
@@ -38,6 +38,10 @@ import {
   extractTextFromFile,
   applyVerifiedHITLMasking,
   PIIRedactResponse,
+  ChatDocument,
+  registerDocument,
+  listDocuments,
+  applyDocumentMasking,
 } from '@/lib/api';
 
 interface Message {
@@ -83,11 +87,16 @@ export function ChatSection() {
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const [documentLibrary, setDocumentLibrary] = useState<ChatDocument[]>([]);
+  const [selectedDocumentId, setSelectedDocumentId] = useState<string>('');
+  const [contextSelectorOpen, setContextSelectorOpen] = useState(false);
+  const [chatError, setChatError] = useState('');
 
-  // Active indexed context document info
-  const [attachedDoc, setAttachedDoc] = useState<string>('patient_records.pdf');
-  const [activeMaskedDocText, setActiveMaskedDocText] = useState<string>('');
-  const [activeMapping, setActiveMapping] = useState<Record<string, string>>({});
+  // Keep client-side fallback context isolated by backend document ID.
+  const [localDocumentContexts, setLocalDocumentContexts] = useState<Record<string, {
+    maskedText: string;
+    mapping: Record<string, string>;
+  }>>({});
 
   // Multi-File Human-in-the-Loop (HITL) Modal State
   const [hitlModalOpen, setHitlModalOpen] = useState(false);
@@ -106,26 +115,100 @@ export function ChatSection() {
     model: 'Llama-3.3-70B',
   });
 
+  const selectedDocuments = documentLibrary.filter((doc) => doc.id === selectedDocumentId && doc.status === 'READY');
+  const attachedDoc = selectedDocuments.map((doc) => doc.filename).join(', ');
+  const activeDocumentContexts = [selectedDocumentId]
+    .map((documentId) => localDocumentContexts[documentId])
+    .filter((context): context is { maskedText: string; mapping: Record<string, string> } => Boolean(context));
+  const activeMaskedDocText = activeDocumentContexts.map((context) => context.maskedText).join('\n');
+  const activeMapping = Object.fromEntries(
+    Object.entries(activeDocumentContexts.reduce<Record<string, Set<string>>>((merged, context) => {
+      Object.entries(context.mapping).forEach(([token, value]) => {
+        if (!merged[token]) merged[token] = new Set<string>();
+        merged[token].add(value);
+      });
+      return merged;
+    }, {})).flatMap(([token, values]) => values.size === 1 ? [[token, [...values][0]]] : [])
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      listDocuments().catch(() => [] as ChatDocument[]),
+      Promise.resolve(typeof window !== 'undefined' ? window.localStorage.getItem('privacyshield:selected-document-id') : null),
+    ]).then(([documents, savedSelection]) => {
+      if (cancelled) return;
+      setDocumentLibrary(documents);
+      const savedId = savedSelection || '';
+      const readyIds = documents.filter((doc) => doc.status === 'READY').map((doc) => doc.id);
+      setSelectedDocumentId(readyIds.includes(savedId) ? savedId : readyIds[0] || '');
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleSharedSelection = (event: Event) => {
+      const id = (event as CustomEvent<string>).detail;
+      if (typeof id === 'string') setSelectedDocumentId(id);
+    };
+    window.addEventListener('privacyshield:document-selection', handleSharedSelection);
+    return () => window.removeEventListener('privacyshield:document-selection', handleSharedSelection);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleDocumentDeleted = (event: Event) => {
+      const deletedId = (event as CustomEvent<string>).detail;
+      if (typeof deletedId !== 'string') return;
+      setDocumentLibrary((documents) => documents.filter((document) => document.id !== deletedId));
+      setLocalDocumentContexts((contexts) => {
+        const next = { ...contexts };
+        delete next[deletedId];
+        return next;
+      });
+      if (selectedDocumentId === deletedId) setSelectedDocumentId('');
+    };
+    window.addEventListener('privacyshield:document-deleted', handleDocumentDeleted);
+    return () => window.removeEventListener('privacyshield:document-deleted', handleDocumentDeleted);
+  }, [selectedDocumentId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleAllDataDeleted = () => {
+      setDocumentLibrary([]);
+      setSelectedDocumentId('');
+      setLocalDocumentContexts({});
+    };
+    window.addEventListener('privacyshield:all-data-deleted', handleAllDataDeleted);
+    return () => window.removeEventListener('privacyshield:all-data-deleted', handleAllDataDeleted);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('privacyshield:selected-document-id', selectedDocumentId);
+    }
+  }, [selectedDocumentId, documentLibrary]);
+
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, loading, hitlModalOpen]);
 
-  useEffect(() => {
-    if (!activeMaskedDocText && attachedDoc) {
-      extractTextFromFile(new File([], attachedDoc)).then((txt) => {
-        if (txt) setActiveMaskedDocText(txt);
-      });
-    }
-  }, [attachedDoc, activeMaskedDocText]);
+  const handleClearChat = () => {
+    if (loading || uploading) return;
+    setMessages([]);
+    setInputQuery('');
+  };
 
   // Trigger hidden file picker
   const handlePaperclipClick = () => {
     fileInputRef.current?.click();
   };
 
-  // Step 1: Process Multiple Files -> Extract text -> Run PII Detection -> Open Side-by-Side HITL Modal
+  // Step 1: Process one file -> Extract text -> Run PII Detection -> Open HITL Modal
   const processSelectedFiles = async (files: File[]) => {
     if (!files || files.length === 0) return;
+    files = files.slice(0, 1);
 
     setUploading(true);
     try {
@@ -133,6 +216,20 @@ export function ChatSection() {
 
       for (let idx = 0; idx < files.length; idx++) {
         const file = files[idx];
+        let documentId: string;
+        try {
+          const registered = await registerDocument(file.name, file.type || 'application/octet-stream');
+          documentId = registered.id;
+          setDocumentLibrary((prev) => [...prev.filter((doc) => doc.id !== registered.id), registered]);
+        } catch {
+          // Keep the document identity stable for the current session if the
+          // API is temporarily unavailable; the backend validates it at mask.
+          documentId = crypto.randomUUID();
+          setDocumentLibrary((prev) => [
+            ...prev.filter((doc) => doc.id !== documentId),
+            { id: documentId, document_id: documentId, filename: file.name, file_type: file.type, status: 'PROCESSING' },
+          ]);
+        }
         
         let detectionRes: PIIRedactResponse;
         let rawText: string;
@@ -165,7 +262,7 @@ export function ChatSection() {
         }));
 
         batchList.push({
-          id: `file-${Date.now()}-${idx}`,
+          id: documentId,
           filename: file.name,
           originalText: rawText,
           entities: hitlEntities,
@@ -229,7 +326,7 @@ export function ChatSection() {
     const startPos = currentFile.originalText.indexOf(term);
 
     const newEnt: HITLEntityItem = {
-      id: `ent-custom-${Date.now()}`,
+      id: `ent-custom-${crypto.randomUUID()}`,
       entity_type: newEntityType,
       text: term,
       start: startPos >= 0 ? startPos : 0,
@@ -255,39 +352,72 @@ export function ChatSection() {
     );
   };
 
-  // Step 2: Confirm Detection -> Send ALL Files in Batch for Masking & Vector Store Indexing
-  const handleConfirmAllHITLAndMask = () => {
+  // Step 2: Confirm detection -> mask this document and index its sanitized text
+  const handleConfirmAllHITLAndMask = async () => {
     if (hitlBatchFiles.length === 0) return;
 
-    let combinedMaskedText = '';
+    setUploading(true);
+    setChatError('');
+
     const mergedMapping: Record<string, string> = {};
     const allEntitiesList: PIIMatch[] = [];
     const processedFilenames: string[] = [];
+    const indexedContexts: Record<string, { maskedText: string; mapping: Record<string, string> }> = {};
 
-    hitlBatchFiles.forEach((file) => {
+    const readyDocumentIds: string[] = [];
+
+    for (const file of hitlBatchFiles) {
       const activeEntities = file.entities.filter((e) => e.enabled);
-      const { maskedText, mapping } = applyVerifiedHITLMasking(file.originalText, activeEntities);
+      const localResult = applyVerifiedHITLMasking(file.originalText, activeEntities);
+      let maskedText = localResult.maskedText;
+      let mapping = localResult.mapping;
 
-      combinedMaskedText += `\n--- DOCUMENT: ${file.filename} ---\n${maskedText}\n`;
+      try {
+        const backendResult = await applyDocumentMasking(file.id, file.originalText, activeEntities);
+        if (!backendResult.ingested) throw new Error(`Document ${file.filename} was not indexed`);
+        maskedText = backendResult.masked_text;
+        mapping = backendResult.mapping;
+        readyDocumentIds.push(file.id);
+      } catch {
+        setChatError(`Could not index ${file.filename}. Select it again after the backend is available.`);
+        setDocumentLibrary((prev) => prev.map((doc) => doc.id === file.id ? { ...doc, status: 'FAILED' } : doc));
+      }
+
+      if (!readyDocumentIds.includes(file.id)) continue;
+
+      indexedContexts[file.id] = { maskedText, mapping };
       Object.assign(mergedMapping, mapping);
       allEntitiesList.push(...activeEntities);
       processedFilenames.push(file.filename);
-    });
+    }
+
+    if (readyDocumentIds.length === 0) {
+      setUploading(false);
+      return;
+    }
+
+    setDocumentLibrary((prev) => prev.map((doc) =>
+      readyDocumentIds.includes(doc.id) ? { ...doc, status: 'READY' } : doc
+    ));
+    // Auto-select only the first completed upload batch. Later uploads remain
+    // visible in the selector and require an explicit context choice.
+    if (!selectedDocumentId) {
+      setSelectedDocumentId(readyDocumentIds[0] || '');
+    }
 
     const primaryDocName = processedFilenames.length > 1
       ? `${processedFilenames[0]} (+${processedFilenames.length - 1} more)`
       : processedFilenames[0];
 
-    // Update active document context
-    setAttachedDoc(primaryDocName);
-    setActiveMaskedDocText(combinedMaskedText);
-    setActiveMapping(mergedMapping);
+    // Persist fallback context by stable document ID. The selector controls
+    // which of these contexts can be used by chat.
+    setLocalDocumentContexts((previous) => ({ ...previous, ...indexedContexts }));
 
     // Add System Notification in Chat thread
     const systemMsg: Message = {
       id: `sys-${Date.now()}`,
       sender: 'system',
-      text: `Batch HITL Verification Complete: ${processedFilenames.length} files (${processedFilenames.join(', ')}) verified by human operator. Total ${allEntitiesList.length} PII entities tokenized. Vector store indexed with zero raw PII leakage.`,
+      text: `HITL Verification Complete: ${processedFilenames[0]} verified by human operator. Total ${allEntitiesList.length} PII entities tokenized. Vector store indexed with zero raw PII leakage.`,
       attachedDocName: primaryDocName,
       entities: allEntitiesList,
       mapping: mergedMapping,
@@ -297,14 +427,20 @@ export function ChatSection() {
     setMessages((prev) => [...prev, systemMsg]);
     setHitlModalOpen(false);
     setHitlBatchFiles([]);
+    setUploading(false);
   };
 
   // Step 3: Handle Send Query -> Generate Response -> Step 4: Display with Masked/Demasked Toggle
   const handleSend = async (overrideText?: string) => {
     const textToSend = overrideText || inputQuery;
     if (!textToSend.trim() || loading) return;
+    if (!selectedDocumentId || selectedDocuments.length === 0) {
+      setChatError('Select one ready document in the context selector before chatting.');
+      return;
+    }
+    setChatError('');
 
-    const userMsgId = `msg-${Date.now()}`;
+    const userMsgId = `msg-${crypto.randomUUID()}`;
     const userMsg: Message = {
       id: userMsgId,
       sender: 'user',
@@ -333,37 +469,18 @@ export function ChatSection() {
         });
       });
 
-      // Step 2: Execute Demasked RAG Chat API call with active document context
-      let docContextText = activeMaskedDocText;
-      if (!docContextText && attachedDoc) {
-        docContextText = await extractTextFromFile(new File([], attachedDoc));
-      }
-      if (!docContextText) {
-        docContextText = piiResult.redacted_text || textToSend;
-      }
-
-      // Pre-sanitize document context if it has not been masked via HITL flow yet
-      if (docContextText && !activeMaskedDocText) {
-        const docPii = await redactPII(docContextText);
-        if (docPii.entities && docPii.entities.length > 0) {
-          const { maskedText, mapping } = applyVerifiedHITLMasking(docContextText, docPii.entities);
-          docContextText = maskedText;
-          Object.assign(activeMapping, mapping);
-          docPii.entities.forEach((ent) => activeEntitiesList.push(ent));
-        }
-      }
-
       const ragResponse: ChatMessageResponse = await sendChatMessage(
         textToSend,
-        textToSend,
-        docContextText,
+        '',
+        activeMaskedDocText,
         activeEntitiesList,
-        llmSettings
+        llmSettings,
+        selectedDocumentId
       );
 
 
       const assistantMsg: Message = {
-        id: `msg-${Date.now() + 1}`,
+        id: `msg-${crypto.randomUUID()}`,
         sender: 'assistant',
         text: ragResponse.demasked_response,
         maskedResponse: ragResponse.masked_response,
@@ -502,19 +619,19 @@ export function ChatSection() {
 
   const presetPrompts = [
     {
-      title: 'Summarize Patient Record',
-      desc: 'Extract medical history & mask identity spans',
-      prompt: 'Patient Rajesh Kumar (Aadhaar: 4521 8901 2345, PAN: ABCDE1234F) requires clinical summary. Please summarize and detect all PII entities.',
+      title: 'Summarize this document',
+      desc: 'Create a concise summary of the selected document',
+      prompt: 'Summarize the selected document and highlight its key terms, decisions, and risks.',
     },
     {
-      title: 'DPDP Compliance Check',
-      desc: 'Verify regulatory exposure under DPDP Act 2023',
-      prompt: 'Check DPDP Act 2023 compliance status for sensitive patient identifiers (Email: rajesh.kumar@gmail.com, Phone: +91 9876543210).',
+      title: 'Check compliance',
+      desc: 'Review the selected document for privacy and regulatory exposure',
+      prompt: 'Check the selected document for DPDP Act 2023 compliance risks and explain the findings.',
     },
     {
-      title: 'Demasked RAG Search',
-      desc: 'Run vector search with zero PII outbound leakage',
-      prompt: 'Query indexed document patient_records.pdf regarding treatment history while keeping Aadhaar and PAN tokenized in vector embeddings.',
+      title: 'Search this document',
+      desc: 'Find the most relevant information in the selected document',
+      prompt: 'Find the most relevant information in the selected document for my question and cite the source sections.',
     },
   ];
 
@@ -523,17 +640,16 @@ export function ChatSection() {
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
-      className={`flex flex-col h-full relative overflow-hidden bg-slate-950/60 transition ${
+      className={`flex flex-col h-full relative overflow-hidden bg-transparent transition ${
         isDragging ? 'ring-4 ring-cyan-500/50 bg-cyan-950/20' : ''
       }`}
     >
-      {/* Hidden File Input supporting MULTIPLE files */}
+      {/* Hidden file input for one document at a time */}
       <input
         type="file"
         ref={fileInputRef}
         onChange={handleFileChange}
         className="hidden"
-        multiple
         accept=".pdf,.doc,.docx,.txt,.csv,.json"
       />
 
@@ -541,7 +657,7 @@ export function ChatSection() {
       {isDragging && (
         <div className="absolute inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center space-y-4 animate-fadeIn border-4 border-dashed border-cyan-500 rounded-3xl">
           <UploadCloud className="h-16 w-16 text-cyan-400 animate-bounce" />
-          <h3 className="text-2xl font-extrabold text-white">Drop Multiple Files Here</h3>
+          <h3 className="text-2xl font-extrabold text-white">Drop a File Here</h3>
           <p className="text-sm text-cyan-300">
             Files will be parsed simultaneously and opened in the Side-by-Side HITL Verification Window.
           </p>
@@ -551,24 +667,19 @@ export function ChatSection() {
 
 
       {/* Main Chat Thread Area */}
-      <div className="flex-1 overflow-y-auto px-4 md:px-8 py-6 space-y-6 flex flex-col">
+      <div className={`chat-thread flex-1 overflow-y-auto px-4 md:px-8 py-6 space-y-6 flex flex-col ${messages.length === 0 ? 'chat-thread-empty' : 'chat-thread-active'}`}>
         {messages.length === 0 ? (
           /* EMPTY STATE: Hero View */
-          <div className="flex-1 flex flex-col items-center justify-center max-w-3xl mx-auto w-full text-center my-auto space-y-8 animate-fadeIn">
-            <div className="space-y-3">
-              <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-cyan-950/80 border border-cyan-800/60 text-cyan-400 text-xs font-semibold shadow-lg shadow-cyan-950/50">
-                <Columns className="h-3.5 w-3.5 text-cyan-400" /> Side-by-Side Multi-File HITL Verification
+          <>
+            <div className="chat-empty-state flex-1 flex flex-col items-center justify-center max-w-3xl mx-auto w-full text-center my-auto animate-fadeIn">
+              <div className="chat-empty-copy">
+                <h2 className="text-3xl md:text-4xl font-extrabold text-white tracking-tight">
+                  Ask PrivacyShield <span className="text-[#aab5ff]">RAG Assistant</span>
+                </h2>
               </div>
-              <h2 className="text-3xl md:text-4xl font-extrabold text-white tracking-tight">
-                Ask PrivacyShield <span className="text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-indigo-300 to-purple-400">RAG Assistant</span>
-              </h2>
-              <p className="text-slate-400 text-xs md:text-sm max-w-xl mx-auto leading-relaxed">
-                Upload multiple files in one go (or drag &amp; drop). Review raw document text vs live tokenized masked text side-by-side in the HITL comparison window before RAG response generation.
-              </p>
             </div>
 
-            {/* Quick Prompt Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 w-full text-left">
+            <div className="chat-suggestion-list grid grid-cols-1 md:grid-cols-3 gap-3 w-full text-left">
               {presetPrompts.map((p, idx) => (
                 <button
                   key={idx}
@@ -583,10 +694,23 @@ export function ChatSection() {
                 </button>
               ))}
             </div>
-          </div>
+          </>
         ) : (
           /* CONVERSATION STREAM */
           <div className="max-w-3xl mx-auto w-full space-y-6 flex-1">
+            <div className="sticky top-0 z-10 flex justify-end pointer-events-none">
+              <button
+                type="button"
+                onClick={handleClearChat}
+                disabled={loading || uploading}
+                title="Clear chat"
+                aria-label="Clear chat"
+                className="pointer-events-auto inline-flex items-center gap-2 rounded-xl border border-slate-700/80 bg-slate-950/85 px-3 py-2 text-[11px] font-medium text-slate-300 shadow-lg backdrop-blur transition hover:border-slate-600 hover:bg-slate-900 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                <span>Clear chat</span>
+              </button>
+            </div>
             {messages.map((msg) => {
               if (msg.sender === 'system') {
                 return (
@@ -701,6 +825,15 @@ export function ChatSection() {
                           </div>
                         )}
 
+                        {msg.sources && msg.sources.length > 0 && (
+                          <div className="border-t border-slate-800/70 pt-2 text-[10px] text-slate-400">
+                            <span className="mr-2 font-semibold uppercase tracking-wider text-slate-500">Sources</span>
+                            {msg.sources.map((source) => (
+                              <span key={source} className="mr-2 inline-block text-indigo-300">{source}</span>
+                            ))}
+                          </div>
+                        )}
+
                         {/* Footer Info */}
                         <div className="pt-2 flex items-center justify-between text-[10px] text-slate-400 border-t border-slate-800/50">
                           <div className="flex items-center gap-1.5 text-indigo-300 font-mono">
@@ -770,34 +903,101 @@ export function ChatSection() {
         )}
       </div>
 
+      {messages.length > 0 && (
+        <div className="chat-followup-shell">
+          <div className="chat-followup-row">
+            {presetPrompts.slice(0, 2).map((p) => (
+              <button
+                key={p.title}
+                onClick={() => handleSend(p.prompt)}
+                className="chat-followup-chip"
+              >
+                {p.title}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* SINGLE CHAT BAR CENTERED AT THE BOTTOM */}
-      <div className="p-4 md:p-6 bg-slate-950/90 border-t border-slate-800/80 backdrop-blur z-20">
+      <div className={`chat-composer-shell p-4 md:p-6 bg-slate-950/90 border-t border-slate-800/80 backdrop-blur z-20 ${messages.length === 0 ? 'chat-composer-empty' : 'chat-composer-active'}`}>
         <div className="max-w-3xl mx-auto w-full relative">
+          <div className="mb-3 relative flex items-center justify-start gap-3">
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setContextSelectorOpen((open) => !open)}
+                aria-expanded={contextSelectorOpen}
+                aria-haspopup="listbox"
+                className="inline-flex max-w-[min(420px,75vw)] items-center gap-2 rounded-xl border border-slate-700/80 bg-slate-900/90 px-3 py-2 text-xs text-slate-300 shadow-lg transition hover:border-cyan-700 hover:text-white"
+              >
+                <Files className="h-3.5 w-3.5 shrink-0 text-cyan-400" />
+                <span className="truncate">
+                  Context: {selectedDocuments[0]?.filename || 'Select a document'}
+                </span>
+                <ChevronDown className={`h-3.5 w-3.5 shrink-0 transition-transform ${contextSelectorOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              {contextSelectorOpen && (
+                <div className="absolute bottom-full left-0 z-40 mb-2 w-[min(360px,calc(100vw-40px))] rounded-2xl border border-slate-700 bg-slate-950 p-2 shadow-2xl">
+                  <div className="flex items-center justify-between border-b border-slate-800 px-2 pb-2 text-[10px] uppercase tracking-wider text-slate-500">
+                    <span>RAG document context</span>
+                    <span>{selectedDocuments.length ? '1 selected' : 'None selected'}</span>
+                  </div>
+                  <div className="mt-1 max-h-52 overflow-y-auto">
+                    {documentLibrary.length === 0 && (
+                      <p className="px-2 py-3 text-xs text-slate-500">Upload and verify a document to add context.</p>
+                    )}
+                    {documentLibrary.map((document) => {
+                      const ready = document.status === 'READY';
+                      const checked = selectedDocumentId === document.id;
+                      return (
+                        <label key={document.id} className={`flex items-center gap-2 rounded-xl px-2 py-2 text-xs ${ready ? 'cursor-pointer hover:bg-slate-900' : 'cursor-not-allowed opacity-50'}`}>
+                          <input
+                            type="radio"
+                            checked={checked}
+                            disabled={!ready}
+                            name="rag-document-context"
+                            onChange={() => setSelectedDocumentId(document.id)}
+                            className="h-3.5 w-3.5 accent-cyan-500"
+                          />
+                          <FileText className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+                          <span className="min-w-0 flex-1 truncate text-slate-300">{document.filename}</span>
+                          <span className={`shrink-0 text-[10px] ${ready ? 'text-emerald-400' : document.status === 'FAILED' ? 'text-red-400' : 'text-amber-400'}`}>
+                            {ready ? 'Ready' : document.status === 'FAILED' ? 'Failed' : 'Processing…'}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-1 border-t border-slate-800 px-2 pt-2 text-[10px] text-slate-500">
+                    Only the selected ready document is sent to retrieval.
+                  </div>
+                </div>
+              )}
+            </div>
+            {chatError && <span className="max-w-[45%] text-right text-[10px] text-amber-300">{chatError}</span>}
+          </div>
           <form
             onSubmit={(e) => {
               e.preventDefault();
               handleSend();
             }}
-            className="relative flex items-center rounded-2xl bg-slate-900/90 border border-slate-800/90 focus-within:border-cyan-500/80 focus-within:ring-2 focus-within:ring-cyan-500/20 shadow-2xl transition duration-200"
+            className="chat-composer-form relative flex items-center rounded-2xl bg-slate-900/90 border border-slate-800/90 focus-within:border-cyan-500/80 focus-within:ring-2 focus-within:ring-cyan-500/20 shadow-2xl transition duration-200"
           >
-            {/* Attachment Button & PII Detection Progress */}
+            {/* Compact file action aligned with the send control */}
             <button
               type="button"
               onClick={handlePaperclipClick}
               disabled={uploading}
-              title="Attach Multiple Files for Side-by-Side HITL Verification & Masking"
-              className="pl-4 text-slate-400 hover:text-cyan-400 transition cursor-pointer flex items-center gap-2 focus:outline-none disabled:cursor-wait"
+              title="Add files"
+              aria-label="Add files"
+              className="chat-attach-control absolute left-3 bottom-2 h-9 w-9 rounded-full text-slate-400 hover:text-cyan-400 hover:bg-slate-800 transition cursor-pointer flex items-center justify-center focus:outline-none disabled:cursor-wait"
             >
               {uploading ? (
-                <div className="flex items-center gap-2 px-2.5 py-1 rounded-xl bg-cyan-950/80 border border-cyan-800 text-cyan-300 text-xs font-medium animate-pulse shadow-inner">
-                  <RefreshCw className="h-3.5 w-3.5 animate-spin text-cyan-400" />
-                  <span>PII detection in progress...</span>
-                </div>
+                <RefreshCw className="h-4 w-4 animate-spin text-cyan-400" />
               ) : (
-                <div className="flex items-center gap-1.5 text-slate-400 hover:text-cyan-400 transition">
-                  <Paperclip className="h-4 w-4 text-cyan-400" />
-                  <span className="text-xs font-semibold text-slate-300 hover:text-cyan-300">Attach Files</span>
-                </div>
+                <Plus className="h-5 w-5" />
               )}
             </button>
 
@@ -806,13 +1006,20 @@ export function ChatSection() {
               type="text"
               value={inputQuery}
               onChange={(e) => setInputQuery(e.target.value)}
-              placeholder={uploading ? 'PII detection in progress...' : 'Ask anything or attach files...'}
-              className="w-full py-4 pl-3 pr-24 bg-transparent text-sm text-slate-100 placeholder-slate-500 focus:outline-none font-sans"
+              placeholder={uploading ? 'PII detection in progress...' : messages.length > 0 ? 'Ask anything about this document...' : 'Ask anything or attach files...'}
+              className="w-full py-4 pl-3 pr-48 bg-transparent text-sm text-slate-100 placeholder-slate-500 focus:outline-none font-sans"
               disabled={loading || uploading}
             />
 
+            {messages.length > 0 && (
+              <div className="chat-current-doc absolute top-3 left-4 inline-flex items-center gap-2 rounded-full border border-slate-700/80 bg-slate-800/70 px-3 py-1 text-[11px] text-slate-300">
+                <FileText className="h-3.5 w-3.5 text-indigo-300" />
+                <span className="max-w-[240px] truncate">{attachedDoc || 'Current document'}</span>
+              </div>
+            )}
+
             {/* Send Button */}
-            <div className="absolute right-2 flex items-center gap-2">
+            <div className="chat-send-control absolute right-2 flex items-center gap-2">
               <button
                 type="submit"
                 disabled={!inputQuery.trim() || loading}
@@ -828,7 +1035,7 @@ export function ChatSection() {
 
       {/* SIDE-BY-SIDE HUMAN-IN-THE-LOOP (HITL) MULTI-FILE VERIFICATION MODAL */}
       {hitlModalOpen && hitlBatchFiles.length > 0 && currentFile && (
-        <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 md:p-6 animate-fadeIn">
+        <div className="workspace-modal fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 md:p-6 animate-fadeIn">
           <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-6xl w-full max-h-[95vh] flex flex-col shadow-2xl overflow-hidden">
             {/* Modal Top Header */}
             <div className="p-6 border-b border-slate-800/80 bg-slate-950/80 flex items-center justify-between">
@@ -840,7 +1047,7 @@ export function ChatSection() {
                   <h3 className="text-lg font-extrabold text-white flex items-center gap-2">
                     Side-by-Side HITL Verification
                     <span className="text-xs px-2.5 py-0.5 rounded-full bg-cyan-950 text-cyan-400 border border-cyan-800 font-mono">
-                      Batch of {hitlBatchFiles.length} {hitlBatchFiles.length === 1 ? 'File' : 'Files'}
+                      One document
                     </span>
                   </h3>
                   <p className="text-xs text-slate-400">
@@ -863,7 +1070,7 @@ export function ChatSection() {
             {/* MULTI-FILE SELECTOR TABS AT TOP */}
             <div className="px-6 py-3 bg-slate-950/60 border-b border-slate-800/80 flex items-center gap-2 overflow-x-auto">
               <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider flex items-center gap-1 mr-2">
-                <Files className="h-3.5 w-3.5 text-cyan-400" /> Batch Documents:
+                <Files className="h-3.5 w-3.5 text-cyan-400" /> Document:
               </span>
               {hitlBatchFiles.map((file, idx) => (
                 <button
@@ -1056,7 +1263,7 @@ export function ChatSection() {
                 className="px-6 py-3 rounded-xl bg-gradient-to-r from-cyan-500 via-indigo-500 to-purple-600 hover:from-cyan-400 hover:to-indigo-400 text-slate-950 font-extrabold text-xs flex items-center gap-2 shadow-xl shadow-cyan-500/25 transition"
               >
                 <CheckCircle2 className="h-4 w-4 text-slate-950" />
-                <span>Verify &amp; Mask All {hitlBatchFiles.length} Files</span>
+                <span>Verify &amp; Mask Document</span>
                 <ArrowRight className="h-4 w-4 text-slate-950" />
               </button>
             </div>

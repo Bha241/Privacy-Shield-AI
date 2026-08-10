@@ -1,6 +1,8 @@
 import hashlib
 import json
+import logging
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -8,6 +10,8 @@ from dataclasses import dataclass, asdict
 
 from pii_detector.db.database import db_manager
 from pii_detector.db.models import AuditLogEntryModel
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -77,12 +81,16 @@ class AuditLogAgent:
         actor_id: str = "usr_system",
         document_id: Optional[str] = None,
         dpdp_compliant: bool = True,
-        user_approved: bool = True
+        user_approved: bool = True,
+        persist_document_fk: bool = True,
     ) -> Dict[str, Any]:
         """Record an immutable, hash-chained audit entry in PostgreSQL and JSON storage."""
         timestamp_dt = datetime.utcnow()
         timestamp_str = timestamp_dt.isoformat()
-        log_id = f"LOG-{int(time.time() * 1000)}"
+        # Millisecond timestamps collide when upload/masking/RAG events happen
+        # in the same request flow. Audit IDs must be unique independently of
+        # event timing so database writes cannot be silently rolled back.
+        log_id = f"LOG-{uuid.uuid4().hex}"
 
         doc_id_str = document_id or details.get("document_id") or details.get("file_name") or "doc_system"
 
@@ -103,7 +111,7 @@ class AuditLogAgent:
                 log_id=log_id,
                 actor_id=actor_id,
                 action_type=action_type,
-                document_id=doc_id_str if doc_id_str.startswith("doc_") else None,
+                document_id=(doc_id_str if persist_document_fk and doc_id_str.startswith("doc_") and doc_id_str != "doc_system" else None),
                 timestamp=timestamp_dt,
                 prev_hash=prev_hash,
                 entry_hash=entry_hash,
@@ -113,6 +121,7 @@ class AuditLogAgent:
             session.commit()
         except Exception as e:
             session.rollback()
+            logger.exception("Failed to persist audit event %s to the database", log_id)
         finally:
             session.close()
 

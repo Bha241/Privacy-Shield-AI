@@ -4,8 +4,8 @@ class EntityFusion:
 
         entities = regex_entities + llm_entities
 
-        remove duplicates
+        # Remove duplicates
 
-        sort by start
+        # Sort by start
 
         return entities

@@ -21,5 +21,5 @@ except Exception as e:
     print(f"Module alias warning: {e}")
 
 if __name__ == "__main__":
-    print("Starting PrivacyShieldAI Multi-Agent Enterprise Backend on http://0.0.0.0:8000 (127.0.0.1 / localhost) ...", flush=True)
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True, log_level="info")
+    print("Starting PrivacyShieldAI backend on http://127.0.0.1:8000 ...", flush=True)
+    uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=False, log_level="info")

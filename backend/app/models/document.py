@@ -5,7 +5,9 @@ from sqlalchemy.orm import relationship
 from app.core.database import Base
 
 class Document(Base):
-    __tablename__ = "documents"
+    # Keep the core API document store separate from the legacy agent engine's
+    # incompatible `documents` schema while sharing the same PostgreSQL database.
+    __tablename__ = "app_documents"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     filename = Column(String(255), nullable=False)

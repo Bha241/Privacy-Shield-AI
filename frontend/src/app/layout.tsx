@@ -1,12 +1,9 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
 import "./globals.css";
 
-const inter = Inter({ subsets: ["latin"] });
-
 export const metadata: Metadata = {
-  title: "PrivacyShieldAI - Enterprise PII Detection & Redaction SaaS",
-  description: "Enterprise-grade multi-tenant PII detection, redaction, risk analytics, and DPDP/GDPR audit compliance platform.",
+  title: "PrivacyShield — privacy operations workspace",
+  description: "A privacy operations workspace for PII detection, redaction, risk analytics, and audit readiness.",
 };
 
 export default function RootLayout({
@@ -16,7 +13,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark h-full">
-      <body className={`${inter.className} bg-slate-950 text-slate-100 antialiased h-full overflow-hidden`}>
+      <body className="bg-slate-950 text-slate-100 antialiased h-full overflow-hidden">
         {children}
       </body>
     </html>

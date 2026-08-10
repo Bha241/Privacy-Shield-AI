@@ -1,4 +1,10 @@
 from pii_detector.recognizers.regex_loader import RegexLoader
+from pii_detector.recognizers.regex_validator import (
+    is_valid_aadhaar,
+    is_valid_gstin,
+    is_valid_ifsc,
+    is_valid_pan,
+)
 from pii_detector.schemas.entities import Entity
 
 
@@ -34,6 +40,14 @@ class RegexRecognizer:
 
                 if val and val.strip():
                     clean_val = val.strip()
+                    if label == "AADHAAR" and not is_valid_aadhaar(clean_val):
+                        continue
+                    if label == "PAN" and not is_valid_pan(clean_val):
+                        continue
+                    if label == "GSTIN" and not is_valid_gstin(clean_val):
+                        continue
+                    if label == "IFSC" and not is_valid_ifsc(clean_val):
+                        continue
                     clean_end = end
                     if label == "NAME":
                         words = clean_val.split()

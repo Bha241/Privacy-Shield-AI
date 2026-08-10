@@ -13,17 +13,9 @@ from pii_detector.agents.dpdp_guardrails import DPDPGuardrailsEngine
 from pii_detector.agents.masking_agent import MaskingAgent
 from pii_detector.agents.privacy_rag_agent import PrivacyRAGAgent
 from pii_detector.agents.audit_log_agent import AuditLogAgent
+from app.agents.observability import traceable
 
 logger = logging.getLogger(__name__)
-
-try:
-    from langsmith import traceable
-except ImportError:
-    def traceable(*args, **kwargs):
-        def decorator(func):
-            return func
-        return decorator
-
 
 class PrivacyAgentState(TypedDict):
     document_id: str
