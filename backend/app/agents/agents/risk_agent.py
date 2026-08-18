@@ -24,6 +24,8 @@ class RiskAgent:
     CATEGORY_WEIGHTS = {
         "Medical": 1.5,
         "Financial": 1.4,
+        "Commerce": 1.3,
+        "Supply Chain": 1.25,
         "HR": 1.2,
         "Legal": 1.1,
         "General": 1.0

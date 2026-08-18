@@ -23,9 +23,9 @@ class PIIDetectionAgent:
         self.detector = PIIDetector(enable_llm=enable_llm_residual)
 
 
-    def process_file_on_the_go(self, file_path: str, domain: str = "general") -> Dict[str, Any]:
+    def process_file_on_the_go(self, file_path: str, domain: Optional[str] = None) -> Dict[str, Any]:
         """
-        Reads document and detects PII entities on the go based on domain rules.
+        Reads document and detects PII candidate entities on the go.
         Returns raw text and structured candidate entities for HITL approval.
         """
         raw_text = self.reader.read_document(file_path)
@@ -43,36 +43,36 @@ class PIIDetectionAgent:
         for idx, e in enumerate(detection_res.all_entities, start=1):
             item = asdict(e)
             item["id"] = idx
-            item["approved"] = True  # Default candidate status for HITL review
+            item["approved"] = False  # Candidate status for HITL review - explicit approval required
             item["user_custom_label"] = None
             entities_list.append(item)
 
         return {
             "status": "success",
             "raw_text": raw_text,
-            "domain": domain,
+            "domain": domain or "general",
             "detected_entities": entities_list,
             "total_count": len(entities_list),
             "regex_spacy_count": len(detection_res.regex_entities),
             "llm_count": len(detection_res.llm_entities)
         }
 
-    def process_text_on_the_go(self, text: str, domain: str = "general") -> Dict[str, Any]:
-        """Detects PII entities directly from raw text input based on domain."""
+    def process_text_on_the_go(self, text: str, domain: Optional[str] = None) -> Dict[str, Any]:
+        """Detects PII candidate entities directly from raw text input."""
         detection_res = self.detector.detect(text, domain=domain)
 
         entities_list = []
         for idx, e in enumerate(detection_res.all_entities, start=1):
             item = asdict(e)
             item["id"] = idx
-            item["approved"] = True
+            item["approved"] = False  # Candidate status for HITL review - explicit approval required
             item["user_custom_label"] = None
             entities_list.append(item)
 
         return {
             "status": "success",
             "raw_text": text,
-            "domain": domain,
+            "domain": domain or "general",
             "detected_entities": entities_list,
             "total_count": len(entities_list),
         }

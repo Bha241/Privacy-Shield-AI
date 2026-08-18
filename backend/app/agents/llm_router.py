@@ -55,6 +55,15 @@ MODEL_MAPPING = {
     "Llama-3.1-8B": "llama-3.1-8b-instant",
     "llama-3.1-8b-instant": "llama-3.1-8b-instant",
     "llama-3.1-70b-versatile": "llama-3.3-70b-versatile",
+    "gpt-oss-120b": "openai/gpt-oss-120b",
+    "openai/gpt-oss-120b": "openai/gpt-oss-120b",
+    "gpt-oss-20b": "openai/gpt-oss-20b",
+    "openai/gpt-oss-20b": "openai/gpt-oss-20b",
+    "qwen3.6-27b": "qwen/qwen3.6-27b",
+    "qwen-27b": "qwen/qwen3.6-27b",
+    "qwen/qwen3.6-27b": "qwen/qwen3.6-27b",
+    "groq/compound": "groq/compound",
+    "groq/compound-mini": "groq/compound-mini",
 }
 
 
@@ -101,8 +110,9 @@ class LLMRouter:
     - Local Qwen
     """
 
-    def __init__(self, default_model: str = "llama-3.3-70b-versatile"):
-        self.default_model = MODEL_MAPPING.get(default_model, default_model)
+    def __init__(self, default_model: Optional[str] = None):
+        configured_default = default_model or os.getenv("GROQ_MODEL", os.getenv("DEFAULT_CLOUD_MODEL", "openai/gpt-oss-120b"))
+        self.default_model = MODEL_MAPPING.get(configured_default, configured_default)
         self.local_provider = LocalQwenProvider()
 
     def _resolve_provider_and_model(
@@ -118,24 +128,27 @@ class LLMRouter:
         lower_model = norm_model.lower()
 
         # Check explicit provider prefixes or model signatures
-        if lower_model.startswith("openai/") or lower_model.startswith("gpt-"):
-            key = os.getenv("OPENAI_API_KEY")
-            return OpenAIProvider(api_key=key, default_model=norm_model.replace("openai/", "")), norm_model.replace("openai/", "")
-
-        if lower_model.startswith("openrouter/") or lower_model.startswith("meta-llama/"):
+        if lower_model.startswith("openrouter/"):
             key = os.getenv("OPENROUTER_API_KEY")
             if key:
                 return OpenRouterProvider(api_key=key, default_model=norm_model.replace("openrouter/", "")), norm_model.replace("openrouter/", "")
 
         if lower_model.startswith("together/"):
             key = os.getenv("TOGETHER_API_KEY")
-            return TogetherAIProvider(api_key=key, default_model=norm_model.replace("together/", "")), norm_model.replace("together/", "")
+            if key:
+                return TogetherAIProvider(api_key=key, default_model=norm_model.replace("together/", "")), norm_model.replace("together/", "")
 
         if lower_model.startswith("metallama/") or lower_model.startswith("llama-api/"):
             key = os.getenv("META_LLAMA_API_KEY")
-            return MetaLlamaProvider(api_key=key, default_model=norm_model), norm_model
+            if key:
+                return MetaLlamaProvider(api_key=key, default_model=norm_model), norm_model
 
-        # Default Primary Cloud Provider: Groq
+        # If proprietary OpenAI model requested (gpt-4o, etc.) and OpenAI key is available
+        if (lower_model.startswith("gpt-4") or lower_model.startswith("o1") or lower_model.startswith("o3")) and os.getenv("OPENAI_API_KEY"):
+            key = os.getenv("OPENAI_API_KEY")
+            return OpenAIProvider(api_key=key, default_model=norm_model), norm_model
+
+        # Default Primary Cloud Provider: Groq (supports openai/gpt-oss-*, qwen/*, llama-3*, etc.)
         groq_key = override_groq_key if override_groq_key is not None else os.getenv("GROQ_API_KEY")
         target_groq_model = normalize_groq_model(norm_model)
         return GroqProvider(api_key=groq_key, default_model=target_groq_model), target_groq_model

@@ -1,3 +1,4 @@
+from typing import Optional
 from pii_detector.recognizers.regex_recognizer import RegexRecognizer
 from pii_detector.recognizers.spacy_recognizer import SpacyRecognizer
 from pii_detector.recognizers.credential_recognizer import CredentialRecognizer
@@ -102,11 +103,12 @@ class PIIDetector:
                     existing_spans.append((start, end, label))
         return context_entities
 
-    def detect(self, text, use_llm_residual: bool = True, domain: str = "general"):
+    def detect(self, text, use_llm_residual: bool = True, domain: Optional[str] = None):
         # PII detection uses the deterministic Fast pipeline. It combines the
         # configured recognizers so credentials, structured identifiers, dates,
         # addresses, and general entities are handled without a separate model
         # mode or shared model state.
+        effective_domain = domain or "general"
         presidio_entities = self.presidio.recognize(text)
         # The supplied Presidio detector is available as an explicit Fast-mode
         # engine through PRIVACYSHIELD_ENABLE_PRESIDIO=true. The stable
@@ -116,7 +118,7 @@ class PIIDetector:
             regex_entities = []
             spacy_entities = []
         else:
-            regex_entities = self.regex.recognize(text, domain=domain)
+            regex_entities = self.regex.recognize(text, domain=effective_domain)
             spacy_entities = self.spacy.recognize(text)
         credential_entities = self.credentials.recognize(text)
         structured_entities = self.structured.recognize(text)

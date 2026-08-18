@@ -1,5 +1,8 @@
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -13,15 +16,16 @@ class DPDPComplianceResult:
 
 class DPDPGuardrailsEngine:
     """
-    DPDP Guardrails Engine based on Digital Personal Data Protection Act 2023 & Rules 2025.
+    Application Guardrails Engine inspired by Digital Personal Data Protection Act 2023 & Rules 2025.
     
-    Verifies:
-    1. Data Fiduciary Notice & Verifiable Consent (Rule 3, 10, 11)
-    2. Purpose Limitation & Data Minimization (Rule 3(b)(ii), Rule 5)
-    3. Reasonable Security Safeguards & Zero Raw PII Cloud Transmission (Rule 6(1)(a))
-    4. Minor / Child Data Extra Consent Guardrail (Rule 10)
-    5. Immutable Auditability & Log Retention (Rule 6(1)(c), Rule 12)
-    6. Right to Erasure & Purpose Completion Expiry (Rule 8)
+    Provides technical guardrails and controls:
+    1. Zero Unmasked PII & Candidate Extraction (Rule 6(1)(a))
+    2. Data Principal Consent & Human-in-the-Loop (HITL) Review (Rule 3)
+    3. Minor / Child Data Extra Consent Guardrail (Rule 10)
+    4. Reasonable Security Safeguards & Zero Raw PII Cloud Transmission (Rule 6(1)(a))
+    5. Immutable Auditability & Log Retention Safeguard (Rule 6(1)(c), Rule 12)
+    
+    Note: These are application-level security and privacy guardrails, not legal advice or statutory certifications.
     """
 
     def evaluate_document_processing(
@@ -30,29 +34,37 @@ class DPDPGuardrailsEngine:
         detected_entities: List[Dict[str, Any]],
         human_approved_count: int,
         total_entities_count: int,
-        has_child_data: bool = False
+        hitl_review_completed: bool = False,
+        has_child_data: bool = False,
+        domain: str = "General",
+        compliance_rule_set: str = "STANDARD_PRIVACY_RULES",
+        cloud_transmission_safe: Optional[bool] = None,
+        audit_logged: Optional[bool] = None,
     ) -> DPDPComplianceResult:
         passed_rules = []
         violations = []
         status = {}
         recommendations = []
 
-        # 1. Zero Unmasked PII Guardrail
+        # 1. PII Candidate Detection Check (Rule 6(1)(a))
+        # Note: Detection of PII indicates privacy controls are required, not a violation by itself.
+        status["PII_DETECTION_CHECK"] = True
         if total_entities_count == 0:
-            status["PII_DETECTION_CHECK"] = True
             passed_rules.append("DPDP Rule 6(1)(a): No unmasked PII detected in document.")
         else:
-            status["PII_DETECTION_CHECK"] = True
-            passed_rules.append(f"DPDP Rule 6(1)(a): Detected {total_entities_count} PII entities for masking.")
+            passed_rules.append(f"DPDP Rule 6(1)(a): Detected {total_entities_count} PII entities requiring privacy protection controls.")
 
-        # 2. Human-in-the-Loop (HITL) Consent Verification (Rule 3)
-        if total_entities_count > 0 and human_approved_count == 0:
+        # 2. Human-in-the-Loop (HITL) Review Verification (Rule 3)
+        if total_entities_count > 0 and not hitl_review_completed:
             status["HITL_CONSENT_VERIFICATION"] = False
-            violations.append("DPDP Rule 3: PII Entities detected but no human verification/consent was recorded.")
-            recommendations.append("Ensure human review & approval of detected PII entities before final ingestion.")
+            violations.append("DPDP Rule 3: PII entities detected but HITL verification has not been completed.")
+            recommendations.append("Complete human review & approval of detected PII entities before final ingestion.")
+        elif total_entities_count > 0 and hitl_review_completed:
+            status["HITL_CONSENT_VERIFICATION"] = True
+            passed_rules.append(f"DPDP Rule 3: HITL verification completed for detected PII entities ({human_approved_count} approved for masking).")
         else:
             status["HITL_CONSENT_VERIFICATION"] = True
-            passed_rules.append("DPDP Rule 3: Human-in-the-loop verification recorded for PII redaction.")
+            passed_rules.append("DPDP Rule 3: No PII detected; HITL verification requirement satisfied.")
 
         # 3. Child/Minor Data Safeguard (Rule 10)
         if has_child_data:
@@ -60,15 +72,25 @@ class DPDPGuardrailsEngine:
             passed_rules.append("DPDP Rule 10: Special parental/guardian verifiable consent guardrail active.")
         else:
             status["CHILD_DATA_PROTECTION"] = True
-            passed_rules.append("DPDP Rule 10: Standard adult data principal processing.")
+            passed_rules.append("DPDP Rule 10: Standard adult data principal processing guardrail active.")
 
         # 4. Security & Storage Safeguards (Rule 6)
-        status["SECURITY_SAFEGUARDS"] = True
-        passed_rules.append("DPDP Rule 6: Local tokenized obfuscation enabled; zero PII sent to external cloud.")
+        if cloud_transmission_safe is False:
+            status["SECURITY_SAFEGUARDS"] = False
+            violations.append("DPDP Rule 6: Potential raw PII leakage detected in cloud transmission check.")
+            recommendations.append("Block external cloud transmission and review tokenized obfuscation.")
+        else:
+            status["SECURITY_SAFEGUARDS"] = True
+            passed_rules.append("DPDP Rule 6: Local tokenized obfuscation enabled; zero PII sent to external cloud.")
 
         # 5. Auditability (Rule 6(1)(c))
-        status["IMMUTABLE_AUDIT_LOG"] = True
-        passed_rules.append("DPDP Rule 6(1)(c): Immutable audit log entry generated for processing.")
+        if audit_logged is False:
+            status["IMMUTABLE_AUDIT_LOG"] = False
+            violations.append("DPDP Rule 6(1)(c): Audit logging failed or not recorded.")
+            recommendations.append("Ensure audit log service is active and accessible.")
+        else:
+            status["IMMUTABLE_AUDIT_LOG"] = True
+            passed_rules.append("DPDP Rule 6(1)(c): Immutable audit log entry generated for processing.")
 
         is_compliant = len(violations) == 0
 
@@ -83,13 +105,19 @@ class DPDPGuardrailsEngine:
     def evaluate_cloud_transmission(self, text_to_transmit: str, entity_mapping: Dict[str, str]) -> Dict[str, Any]:
         """
         Ensures that NO raw PII values present in entity_mapping exist in text_to_transmit.
+        Strictly avoids logging raw PII in application logs.
         """
         leakages = []
         for token, raw_val in entity_mapping.items():
-            if len(raw_val.strip()) > 2 and raw_val.lower() in text_to_transmit.lower():
-                leakages.append({"token": token, "leaked_value": raw_val})
+            if raw_val and len(raw_val.strip()) > 2 and raw_val.lower() in text_to_transmit.lower():
+                leakages.append({"token": token, "has_leakage": True})
 
         is_safe = len(leakages) == 0
+        if not is_safe:
+            logger.warning(f"[Cloud Security Guardrail] Potential leakage detected for {len(leakages)} tokens. Transmission blocked.")
+        else:
+            logger.info("[Cloud Security Guardrail] Zero PII leakage verified. Cloud transmission approved.")
+
         return {
             "is_safe": is_safe,
             "leakages_found": leakages,

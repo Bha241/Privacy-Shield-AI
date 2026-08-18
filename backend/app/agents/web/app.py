@@ -159,7 +159,7 @@ async def detect_pii_on_the_go(
         with open(saved_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
 
-        res = get_detection_agent().process_file_on_the_go(str(saved_path), domain=domain or "general")
+        res = get_detection_agent().process_file_on_the_go(str(saved_path))
         if res["status"] == "empty":
             raise HTTPException(status_code=400, detail="No readable text found in document.")
 
@@ -534,6 +534,8 @@ async def chat_rag_qna(
             detection_res = get_detection_agent().process_text_on_the_go(query, domain=session_domain)
             prompt_pii_entities = detection_res.get("detected_entities", [])
             if prompt_pii_entities:
+                for e in prompt_pii_entities:
+                    e["approved"] = True
                 masked_res = get_masking_agent().apply_hitl_masking(query, prompt_pii_entities)
                 masked_query = masked_res.masked_text
                 query_mapping = masked_res.mapping
@@ -570,7 +572,7 @@ async def chat_rag_qna(
         demask_res = get_demasking_agent().demask_text(
             masked_text=qna_res["masked_response"],
             mapping=merged_mapping,
-            user_approved=True
+            user_approved=bool(auto_demask)
         )
 
         # Audit Event for Cloud QnA
@@ -696,7 +698,7 @@ async def chat_rag_qna_stream(
                     unmasked_accum = demask_agent.demask_text(
                         masked_text=accumulated_masked,
                         mapping=merged_mapping,
-                        user_approved=True
+                        user_approved=bool(auto_demask)
                     )["output_text"]
 
                     chunk_payload = {
@@ -715,7 +717,7 @@ async def chat_rag_qna_stream(
             final_unmasked = demask_agent.demask_text(
                 masked_text=accumulated_masked,
                 mapping=merged_mapping,
-                user_approved=True
+                user_approved=bool(auto_demask)
             )["output_text"]
 
             end_payload = {

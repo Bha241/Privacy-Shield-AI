@@ -220,6 +220,9 @@ class AuditLogEntryModel(Base):
             "prev_hash": self.prev_hash,
             "entry_hash": self.entry_hash,
             "origin_ip": details.get("origin_ip"),
+            "dpdp_compliant": details.get("dpdp_compliant", False),
+            "hitl_approved": details.get("hitl_approved", False),
+            "demasking_approved": details.get("demasking_approved", False),
             "details": details,
             "metadata": details,
         }

@@ -158,8 +158,9 @@ def demask_text(text: str, mapping: Dict[str, str]) -> str:
         if token in demasked:
             demasked = demasked.replace(token, str(original))
         else:
-            clean = re.escape(token.strip("<>")).replace(r"\_", r"[_\s\-]?")
-            pattern = re.compile(rf"[<\[]?{clean}[>\]]?", re.IGNORECASE)
+            core = token.strip("<>[]()").replace(r"\_", "_")
+            clean = re.escape(core).replace(r"\_", "_").replace("_", r"[\s_\-]*")
+            pattern = re.compile(rf"[<\[(]?{clean}[>\])]?", re.IGNORECASE)
             demasked = pattern.sub(str(original), demasked)
 
     return demasked
@@ -178,11 +179,12 @@ class PrivacyRAGAgent:
 
     def __init__(
         self,
-        model_name: str = "llama-3.3-70b-versatile",
+        model_name: Optional[str] = None,
         groq_api_key: Optional[str] = None,
         **kwargs
     ):
-        self.model_name = MODEL_MAPPING.get(model_name, model_name)
+        configured_model = model_name or os.getenv("GROQ_MODEL", os.getenv("DEFAULT_CLOUD_MODEL", "openai/gpt-oss-120b"))
+        self.model_name = MODEL_MAPPING.get(configured_model, configured_model)
         self.groq_api_key = groq_api_key or os.getenv("GROQ_API_KEY")
         self.current_document_id = None
         self.file_name = ""
@@ -214,7 +216,18 @@ class PrivacyRAGAgent:
                 return document_id
             if self.document_cache and self.document_cache.has_document(document_id):
                 return document_id
-        return document_id or ""
+    def ingest_masked_text(
+        self,
+        masked_text: str,
+        document_id: Optional[str] = None,
+        file_name: Optional[str] = None
+    ) -> bool:
+        """Ingests masked document text into RAG cache and vector store."""
+        return self.ingest_masked_result(
+            masked_result=masked_text,
+            file_name=file_name,
+            document_id=document_id
+        )
 
     def ingest_masked_result(
         self,
@@ -401,10 +414,11 @@ class PrivacyRAGAgent:
         8. Response Formatter & Quality Review Self-Correction
         9. PII Token De-masking
         """
-        if not document_id:
+        effective_doc_id = document_id or self.current_document_id
+        if not effective_doc_id:
             raise ValueError("No document context selected. Select at least one ready document before chatting.")
 
-        canonical_document_id = self.resolve_document_id(document_id)
+        canonical_document_id = self.resolve_document_id(effective_doc_id)
         # Rehydrate only the explicitly selected documents after a backend
         # restart. Never hydrate or inspect the latest/other document.
         self._hydrate_document_state(canonical_document_id)

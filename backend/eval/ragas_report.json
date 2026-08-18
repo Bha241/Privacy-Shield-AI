@@ -1,0 +1,83 @@
+{
+  "total_samples": 8,
+  "mean_faithfulness": 0.8402,
+  "mean_answer_relevancy": 0.6276,
+  "mean_context_precision": 0.4758,
+  "mean_context_recall": 0.7278,
+  "overall_rag_score": 0.6679,
+  "evaluator_mode": "deterministic_offline_engine",
+  "sample_results": [
+    {
+      "sample_id": "rag_001",
+      "question": "What is the role of Mr. Rajesh Verma in Precision Components?",
+      "faithfulness": 0.945,
+      "answer_relevancy": 0.55,
+      "context_precision": 0.575,
+      "context_recall": 0.7692,
+      "average_score": 0.7098
+    },
+    {
+      "sample_id": "rag_002",
+      "question": "What payment methods and UPI identifiers are accepted for invoice settlement?",
+      "faithfulness": 0.6632,
+      "answer_relevancy": 0.1571,
+      "context_precision": 0.52,
+      "context_recall": 0.75,
+      "average_score": 0.5226
+    },
+    {
+      "sample_id": "rag_003",
+      "question": "What are the tax identifiers associated with Privacy Shield Technologies Pvt. Ltd.?",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.7333,
+      "context_precision": 0.5818,
+      "context_recall": 0.9,
+      "average_score": 0.8038
+    },
+    {
+      "sample_id": "rag_004",
+      "question": "Who is managing the warehouse delivery and how can they be contacted?",
+      "faithfulness": 0.6462,
+      "answer_relevancy": 0.6286,
+      "context_precision": 0.3077,
+      "context_recall": 0.7,
+      "average_score": 0.5706
+    },
+    {
+      "sample_id": "rag_005",
+      "question": "What items are included in Purchase Order PO-PS-2026-3391?",
+      "faithfulness": 0.9375,
+      "answer_relevancy": 0.825,
+      "context_precision": 0.5895,
+      "context_recall": 0.8235,
+      "average_score": 0.7939
+    },
+    {
+      "sample_id": "rag_006",
+      "question": "What is the patient admission and biometric verification status?",
+      "faithfulness": 0.9545,
+      "answer_relevancy": 0.66,
+      "context_precision": 0.4,
+      "context_recall": 0.6923,
+      "average_score": 0.6767
+    },
+    {
+      "sample_id": "rag_007",
+      "question": "What is the policy for de-masking confidential data fields?",
+      "faithfulness": 0.63,
+      "answer_relevancy": 0.7333,
+      "context_precision": 0.2105,
+      "context_recall": 0.4375,
+      "average_score": 0.5028
+    },
+    {
+      "sample_id": "rag_008",
+      "question": "What are the MSME and PAN registration numbers of Precision Components?",
+      "faithfulness": 0.945,
+      "answer_relevancy": 0.7333,
+      "context_precision": 0.6222,
+      "context_recall": 0.75,
+      "average_score": 0.7626
+    }
+  ]
+}

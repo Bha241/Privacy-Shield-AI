@@ -25,7 +25,7 @@ class MaskingAgent:
 
         for item in verified_entities:
             # Only include entities approved by Human-in-the-Loop review
-            if item.get("approved", True):
+            if item.get("approved") is True:
                 label = item.get("user_custom_label") or item.get("label", "PII")
                 entity_objects.append(
                     Entity(

@@ -147,6 +147,22 @@ class DocumentClassifier:
                 r"\bbilling cycle\b", r"\bdue amount\b"
             ]
         },
+        "Shipping Manifest / Bill of Lading": {
+            "persona": "Supply Chain & Logistics Specialist",
+            "keywords": [
+                r"\bbill of lading\b", r"\bshipping manifest\b", r"\bconsignee\b",
+                r"\bconsignor\b", r"\bfreight\b", r"\bport of loading\b", r"\bport of discharge\b",
+                r"\btracking number\b", r"\bcarrier\b", r"\bshipment\b", r"\bconsignment\b"
+            ]
+        },
+        "E-Commerce Order": {
+            "persona": "E-Commerce Compliance Specialist",
+            "keywords": [
+                r"\be[\-\s]?commerce\b", r"\border confirmation\b", r"\bcart id\b",
+                r"\bmerchant id\b", r"\bshipping address\b", r"\bbilling address\b",
+                r"\bsku\b", r"\bcheckout\b", r"\bfulfillment\b"
+            ]
+        },
     }
 
     @classmethod

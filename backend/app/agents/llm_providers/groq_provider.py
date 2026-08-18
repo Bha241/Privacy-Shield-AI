@@ -40,19 +40,27 @@ GROQ_MODEL_MAPPING = {
     "llama-3.3-70b": "llama-3.3-70b-versatile",
     "llama-3.3-70b-instruct": "llama-3.3-70b-versatile",
     "llama-3.3-70b-v": "llama-3.3-70b-versatile",
-    "llama-3.3-70b": "llama-3.3-70b-versatile",
     "llama-3-70b-privacyguard": "llama-3.3-70b-versatile",
-    "llama-3.3-70b": "llama-3.3-70b-versatile",
     "llama-3.1-8b-instant": "llama-3.1-8b-instant",
     "llama-3.1-8b": "llama-3.1-8b-instant",
     "llama-3.1-70b-versatile": "llama-3.3-70b-versatile",
+    "gpt-oss-120b": "openai/gpt-oss-120b",
+    "openai/gpt-oss-120b": "openai/gpt-oss-120b",
+    "gpt-oss-20b": "openai/gpt-oss-20b",
+    "openai/gpt-oss-20b": "openai/gpt-oss-20b",
+    "qwen3.6-27b": "qwen/qwen3.6-27b",
+    "qwen-27b": "qwen/qwen3.6-27b",
+    "qwen/qwen3.6-27b": "qwen/qwen3.6-27b",
+    "groq/compound": "groq/compound",
+    "groq/compound-mini": "groq/compound-mini",
 }
 
 
 def normalize_groq_model(model_name: Optional[str]) -> str:
     """Normalizes model aliases and case variations for Groq API."""
+    default_m = os.getenv("GROQ_MODEL", os.getenv("DEFAULT_CLOUD_MODEL", "openai/gpt-oss-120b"))
     if not model_name:
-        return "llama-3.3-70b-versatile"
+        return default_m
     
     clean = model_name.strip()
     lower = clean.lower()
@@ -61,6 +69,12 @@ def normalize_groq_model(model_name: Optional[str]) -> str:
         return GROQ_MODEL_MAPPING[lower]
     
     # Check partial matches
+    if "120b" in lower or "gpt-oss-120" in lower:
+        return "openai/gpt-oss-120b"
+    if "20b" in lower or "gpt-oss-20" in lower:
+        return "openai/gpt-oss-20b"
+    if "qwen" in lower:
+        return "qwen/qwen3.6-27b"
     if "70b" in lower and ("llama" in lower or "llama3" in lower):
         return "llama-3.3-70b-versatile"
     if "8b" in lower and ("llama" in lower or "llama3" in lower):
@@ -72,9 +86,10 @@ def normalize_groq_model(model_name: Optional[str]) -> str:
 class GroqProvider(BaseLLMProvider):
     """Groq Cloud API LLM Provider."""
 
-    def __init__(self, api_key: Optional[str] = None, default_model: str = "llama-3.3-70b-versatile"):
-        key = api_key or os.getenv("GROQ_API_KEY", "")
-        super().__init__(provider_name="Groq", default_model=default_model, api_key=key)
+    def __init__(self, api_key: Optional[str] = None, default_model: Optional[str] = None):
+        key = api_key if api_key is not None else os.getenv("GROQ_API_KEY", "")
+        model = default_model or os.getenv("GROQ_MODEL", os.getenv("DEFAULT_CLOUD_MODEL", "openai/gpt-oss-120b"))
+        super().__init__(provider_name="Groq", default_model=model, api_key=key)
 
     def validate_config(self, model_name: Optional[str] = None) -> Tuple[bool, Optional[str]]:
         """Validates API key and model name for Groq."""
@@ -150,17 +165,26 @@ class GroqProvider(BaseLLMProvider):
         top_p: float = 0.9,
         **kwargs
     ) -> LLMProviderResponse:
-        """Executes LLM generation via Groq SDK or HTTP API with structured error handling & 8B instant fallback on 429."""
+        """Executes LLM generation via Groq SDK or HTTP API with structured error handling & auto fallback across available Groq models."""
         target_model = normalize_groq_model(model_name or self.default_model)
         try:
             return self._single_generate(messages, target_model, temperature, max_tokens, top_p, **kwargs)
-        except LLMQuotaOrRateLimitError as e:
-            if target_model != "llama-3.1-8b-instant":
-                logger.info(f"[GroqProvider] Model '{target_model}' hit 429 Rate Limit. Attempting auto-switch to 'llama-3.1-8b-instant'...")
-                try:
-                    return self._single_generate(messages, "llama-3.1-8b-instant", temperature, max_tokens, top_p, **kwargs)
-                except Exception:
-                    pass
+        except (LLMQuotaOrRateLimitError, LLMInvalidModelError) as e:
+            # Fallback candidates available on Groq
+            candidates = [
+                "openai/gpt-oss-120b",
+                "openai/gpt-oss-20b",
+                "qwen/qwen3.6-27b",
+                "llama-3.1-8b-instant",
+                "llama-3.3-70b-versatile",
+            ]
+            for cand in candidates:
+                if cand != target_model:
+                    logger.info(f"[GroqProvider] Primary model '{target_model}' failed ({e}). Auto-attempting Groq fallback model '{cand}'...")
+                    try:
+                        return self._single_generate(messages, cand, temperature, max_tokens, top_p, **kwargs)
+                    except Exception:
+                        continue
             raise e
 
     def _single_generate(

@@ -69,13 +69,13 @@ except Exception as err:
 # -------------------------------------------------
 try:
     from app.agents.agents.privacy_rag_agent import PrivacyRAGAgent
-    rag_agent = PrivacyRAGAgent(model_name="llama-3.3-70b-versatile")
+    rag_agent = PrivacyRAGAgent()
     RAG_AGENT_LOADED = True
     print("[Info] PrivacyRAGAgent loaded successfully")
 except Exception as e:
     try:
         from pii_detector.agents.privacy_rag_agent import PrivacyRAGAgent
-        rag_agent = PrivacyRAGAgent(model_name="llama-3.3-70b-versatile")
+        rag_agent = PrivacyRAGAgent()
         RAG_AGENT_LOADED = True
         print("[Info] PrivacyRAGAgent loaded from pii_detector")
     except Exception as e2:
