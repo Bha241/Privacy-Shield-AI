@@ -1,5 +1,5 @@
 # ==============================================================================
-# PrivacyShieldAI Enterprise SaaS - Dependencies Specification
+# PrivacyShieldAI Enterprise - Dependencies Specification
 # ==============================================================================
 
 # Core Web Framework & API Server
@@ -20,7 +20,6 @@ asyncpg>=0.29.0
 psycopg2-binary>=2.9.9
 pgvector>=0.2.5
 redis>=5.0.3
-celery>=5.3.6
 
 # Security, Cryptography & Authentication
 pycryptodome>=3.20.0
@@ -47,7 +46,6 @@ numpy>=1.26.0,<3.0.0
 # Document Processing & Multi-Engine OCR
 PyMuPDF>=1.23.0
 python-docx>=1.1.0
-docx2txt>=0.8
 Pillow>=10.2.0
 opencv-python-headless>=4.9.0.80
 easyocr>=1.7.0

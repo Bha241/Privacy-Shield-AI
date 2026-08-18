@@ -1,18 +1,52 @@
+# Environment & local credentials
 .local/
 .env
 *.env
 backend/.env
+frontend/.env.local
+
+# Virtual environments
 backend/.venv/
+.venv/
+env/
+venv/
+
+# Python bytecode & cache
 **/__pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Databases & local stores
 *.db
+*.sqlite3
+
+# Logs & temporary output dumps
 *.log
+*.log.*
+out_*.txt
+backend/out_pii.txt
+
+# Heavy model weights & GGUF binaries
 *.gguf
 models_local/
 **/model_local/
+
+# Uploads & temporary file storage
 temp_uploads/
 backend/temp_uploads/
-frontend/node_modules/
-frontend/.next/
 backend/app/agents/web/output/
 backend/app/agents/web/uploads/
+
+# Frontend builds
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+*.tsbuildinfo
+
+# OS artifacts
+.DS_Store
+Thumbs.db
