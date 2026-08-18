@@ -108,6 +108,25 @@ npx promptfoo view
 
 ---
 
+## 4. LangSmith Evaluation & Cloud Experiments
+
+LangSmith provides cloud-based evaluation, dataset management, and tracing for PrivacyShield AI.
+
+### Running LangSmith Evaluation
+
+```bash
+# Uploads dataset and runs custom privacy evaluators in LangSmith
+.venv\Scripts\python.exe eval/langsmith_eval.py
+```
+
+This runs your evaluation suite on LangSmith and scores:
+- **`privacy_safety`**: Scored 1.0/0.0 using `find_raw_pii`
+- **`zero_leakage_compliance`**: Context vs response leakage check
+
+View live experiments & traces at: [https://smith.langchain.com](https://smith.langchain.com)
+
+---
+
 ## 4. Unified CLI Runner (`run_eval.py`)
 
 Execute everything from a single command:
